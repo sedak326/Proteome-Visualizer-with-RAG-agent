@@ -1,4 +1,0 @@
-# Ignore large output files
-umap_output/
-prerendered_animations/
-*.h5
