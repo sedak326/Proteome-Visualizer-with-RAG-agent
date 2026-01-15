@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(dir /B \"C:\\Users\\Seda Kavlak\\Desktop\\Master\\Project_Work\\POC\\*.py\")",
+      "Bash(dir:*)"
+    ]
+  }
+}
