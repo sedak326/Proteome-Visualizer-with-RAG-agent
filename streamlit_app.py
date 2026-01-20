@@ -1,6 +1,6 @@
 """
 Marine Mammal Proteome Explorer - Streamlit Version
-User Flow: Select Animals → Watch Animation → Explore Proteomes
+User Flow: Select Animals → Watch Animation (once) → Explore Proteomes
 """
 
 import streamlit as st
@@ -10,6 +10,7 @@ import numpy as np
 import cv2
 from pathlib import Path
 import base64
+import time
 
 # Page configuration
 st.set_page_config(
@@ -60,6 +61,7 @@ SPECIES_DATA = {
 
 SAMPLE_SIZE = 3000
 PRERENDERED_DIR = Path('prerendered_animations')
+ANIMATION_DURATION = 3.5  # seconds - duration of one animation loop
 
 # Custom CSS
 st.markdown("""
@@ -122,48 +124,6 @@ st.markdown("""
         margin-bottom: 15px;
     }
 
-    /* Animal card styling */
-    .animal-card {
-        background: rgba(255, 255, 255, 0.03);
-        border: 2px solid rgba(255, 255, 255, 0.1);
-        border-radius: 16px;
-        padding: 20px;
-        text-align: center;
-        transition: all 0.3s ease;
-        cursor: pointer;
-        height: 280px;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-    }
-
-    .animal-card:hover {
-        background: rgba(255, 255, 255, 0.06);
-        border-color: rgba(100, 255, 218, 0.4);
-        transform: translateY(-4px);
-    }
-
-    .animal-card.selected {
-        background: rgba(255, 255, 255, 0.08);
-        transform: translateY(-6px);
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
-    }
-
-    .animal-card img {
-        width: 120px;
-        height: 120px;
-        object-fit: contain;
-        margin-bottom: 15px;
-    }
-
-    .animal-name {
-        font-size: 14px;
-        font-weight: 600;
-        font-family: 'Inter', sans-serif;
-        margin-bottom: 10px;
-    }
-
     /* Button styling */
     .stButton > button {
         background: rgba(100, 255, 218, 0.1) !important;
@@ -189,20 +149,21 @@ st.markdown("""
         border: 1px solid rgba(100, 100, 100, 0.2) !important;
     }
 
-    /* Animation container */
-    .animation-wrapper {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        padding: 40px;
-        background: rgba(0, 0, 0, 0.3);
-        border-radius: 20px;
-        margin: 20px 0;
+    /* Control panel styling */
+    .control-panel {
+        background: rgba(10, 25, 47, 0.8);
+        border: 1px solid rgba(100, 255, 218, 0.2);
+        border-radius: 16px;
+        padding: 20px;
     }
 
     /* Slider styling */
     .stSlider > div > div > div > div {
         background: #64ffda !important;
+    }
+
+    .stSlider label {
+        color: #a8dadc !important;
     }
 
     /* Metric styling */
@@ -227,6 +188,30 @@ st.markdown("""
         background: #457b9d;
         border-radius: 4px;
     }
+
+    /* Legend styling */
+    .legend-item {
+        display: flex;
+        align-items: center;
+        margin: 8px 0;
+        padding: 8px 12px;
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 8px;
+    }
+
+    .legend-dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        margin-right: 12px;
+        flex-shrink: 0;
+    }
+
+    .legend-text {
+        color: #f1faee;
+        font-family: 'Inter', sans-serif;
+        font-size: 13px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -237,6 +222,8 @@ if 'selected_species' not in st.session_state:
     st.session_state.selected_species = []
 if 'loaded_data' not in st.session_state:
     st.session_state.loaded_data = None
+if 'animation_started' not in st.session_state:
+    st.session_state.animation_started = None
 
 
 def get_image_base64(image_path):
@@ -244,19 +231,25 @@ def get_image_base64(image_path):
     try:
         with open(image_path, 'rb') as f:
             data = base64.b64encode(f.read()).decode()
-        return f"data:image/png;base64,{data}"
+        ext = Path(image_path).suffix.lower()
+        mime = 'image/gif' if ext == '.gif' else 'image/png'
+        return f"data:{mime};base64,{data}"
     except:
         return None
 
 
-def get_animation_path(species_list):
-    """Get path to pre-rendered animation"""
+def get_animation_paths(species_list):
+    """Get paths to animation GIF and last frame PNG"""
     species_keys = sorted([SPECIES_DATA[species]['key'] for species in species_list])
-    filename = '_'.join(species_keys) + '.gif'
-    prerendered_path = PRERENDERED_DIR / filename
-    if prerendered_path.exists():
-        return str(prerendered_path), True
-    return str(prerendered_path), False
+    base_filename = '_'.join(species_keys)
+
+    gif_path = PRERENDERED_DIR / f"{base_filename}.gif"
+    last_frame_path = PRERENDERED_DIR / f"{base_filename}_last_frame.png"
+
+    gif_exists = gif_path.exists()
+    last_frame_exists = last_frame_path.exists()
+
+    return str(gif_path), str(last_frame_path), gif_exists, last_frame_exists
 
 
 @st.cache_data(show_spinner=False)
@@ -342,7 +335,6 @@ def create_umap_plot(loaded_data, point_size, opacity):
             customdata=df['Entry'].tolist()
         ))
 
-    margin = 50
     fig.update_layout(
         title=None,
         xaxis=dict(range=[-350, 350], showgrid=False, zeroline=False, visible=False),
@@ -353,19 +345,14 @@ def create_umap_plot(loaded_data, point_size, opacity):
         hovermode='closest',
         dragmode='lasso',
         clickmode='event+select',
-        legend=dict(
-            orientation="h", yanchor="bottom", y=-0.12, xanchor="center", x=0.5,
-            bgcolor="rgba(10, 25, 47, 0.8)",
-            bordercolor='rgba(100, 255, 218, 0.2)', borderwidth=1,
-            font=dict(size=12, family='Inter, sans-serif', color='#a8dadc')
-        ),
-        margin=dict(l=20, r=20, t=20, b=60),
+        showlegend=False,  # We'll show legend in the control panel instead
+        margin=dict(l=20, r=20, t=20, b=20),
         hoverlabel=dict(
             bgcolor='rgba(10, 25, 47, 0.95)',
             bordercolor='rgba(100, 255, 218, 0.3)',
             font=dict(family='Inter, sans-serif', size=12, color='#f1faee')
         ),
-        height=550
+        height=600
     )
 
     return fig
@@ -391,7 +378,6 @@ def selection_screen():
             border_color = info['color'] if is_selected else 'rgba(255, 255, 255, 0.1)'
             bg_color = 'rgba(255, 255, 255, 0.08)' if is_selected else 'rgba(255, 255, 255, 0.03)'
             shadow = f'0 10px 30px {info["color"]}40' if is_selected else 'none'
-            transform = 'translateY(-6px)' if is_selected else 'translateY(0)'
 
             # Get image as base64
             img_path = Path(info['image'])
@@ -407,8 +393,6 @@ def selection_screen():
                     padding: 25px 15px;
                     text-align: center;
                     box-shadow: {shadow};
-                    transform: {transform};
-                    transition: all 0.3s ease;
                     min-height: 250px;
                     display: flex;
                     flex-direction: column;
@@ -452,86 +436,98 @@ def selection_screen():
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         if st.button("🔬 Analyze Proteomes", disabled=len(st.session_state.selected_species) == 0, use_container_width=True):
+            st.session_state.animation_started = None  # Reset animation timer
             st.session_state.screen = 'animation'
             st.rerun()
 
 
 def animation_screen():
-    """Render the animation screen - separate page"""
+    """Render the animation screen - plays once then transitions"""
     st.markdown('<h1 class="main-title">Proteome Space Transformation</h1>', unsafe_allow_html=True)
     st.markdown('<p class="description">Watch as species silhouettes morph into their UMAP protein embeddings</p>', unsafe_allow_html=True)
 
     species_list = st.session_state.selected_species
 
-    # Check for animation
-    animation_path, exists = get_animation_path(species_list)
+    # Get animation paths
+    gif_path, last_frame_path, gif_exists, last_frame_exists = get_animation_paths(species_list)
 
-    if exists:
-        # Display animation prominently
-        st.markdown("<br>", unsafe_allow_html=True)
+    # Start loading data in background
+    if st.session_state.loaded_data is None:
+        with st.spinner(""):
+            st.session_state.loaded_data = load_data_for_species(tuple(sorted(species_list)))
+
+    if gif_exists:
+        # Track when animation started
+        if st.session_state.animation_started is None:
+            st.session_state.animation_started = time.time()
+
+        elapsed = time.time() - st.session_state.animation_started
+        animation_finished = elapsed >= ANIMATION_DURATION
 
         col1, col2, col3 = st.columns([1, 3, 1])
         with col2:
-            # Read and display GIF
-            with open(animation_path, 'rb') as f:
-                gif_data = f.read()
-                gif_base64 = base64.b64encode(gif_data).decode()
+            if not animation_finished:
+                # Show animated GIF
+                gif_base64 = get_image_base64(gif_path)
+                st.markdown(f"""
+                    <div style="
+                        background: rgba(0, 0, 0, 0.4);
+                        border-radius: 20px;
+                        padding: 30px;
+                        text-align: center;
+                        border: 1px solid rgba(100, 255, 218, 0.2);
+                        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+                    ">
+                        <img src="{gif_base64}" style="max-width: 100%; max-height: 60vh; border-radius: 12px;">
+                    </div>
+                    <p style="text-align: center; color: #64ffda; margin-top: 20px; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
+                        Transforming proteome space...
+                    </p>
+                """, unsafe_allow_html=True)
 
-            # Use HTML to ensure GIF animates properly
-            st.markdown(f"""
-                <div style="
-                    background: rgba(0, 0, 0, 0.4);
-                    border-radius: 20px;
-                    padding: 30px;
-                    text-align: center;
-                    border: 1px solid rgba(100, 255, 218, 0.2);
-                    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
-                ">
-                    <img src="data:image/gif;base64,{gif_base64}"
-                         style="max-width: 100%; max-height: 60vh; border-radius: 12px;">
-                </div>
-            """, unsafe_allow_html=True)
-
-        st.markdown("<br><br>", unsafe_allow_html=True)
-
-        # Button to continue
-        col1, col2, col3 = st.columns([1, 1, 1])
-        with col2:
-            if st.button("Continue to Explorer →", use_container_width=True):
-                # Load data before transitioning
-                with st.spinner("Loading proteome data..."):
-                    st.session_state.loaded_data = load_data_for_species(tuple(sorted(species_list)))
-                st.session_state.screen = 'explorer'
+                # Auto-refresh to check if animation is done
+                time.sleep(0.5)
                 st.rerun()
+            else:
+                # Show frozen last frame
+                if last_frame_exists:
+                    frame_base64 = get_image_base64(last_frame_path)
+                else:
+                    frame_base64 = get_image_base64(gif_path)  # Fallback to gif
 
-        # Back button
-        col1, col2, col3 = st.columns([1, 1, 1])
-        with col2:
-            if st.button("← Back to Selection", use_container_width=True):
-                st.session_state.screen = 'selection'
+                st.markdown(f"""
+                    <div style="
+                        background: rgba(0, 0, 0, 0.4);
+                        border-radius: 20px;
+                        padding: 30px;
+                        text-align: center;
+                        border: 1px solid rgba(100, 255, 218, 0.2);
+                        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+                    ">
+                        <img src="{frame_base64}" style="max-width: 100%; max-height: 60vh; border-radius: 12px;">
+                    </div>
+                    <p style="text-align: center; color: #64ffda; margin-top: 20px; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
+                        ✓ Transformation complete! Loading explorer...
+                    </p>
+                """, unsafe_allow_html=True)
+
+                # Brief pause to show the frozen frame, then transition
+                time.sleep(1.5)
+                st.session_state.screen = 'explorer'
+                st.session_state.animation_started = None
                 st.rerun()
     else:
-        # No animation available
-        st.info(f"Animation not available for this species combination.")
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        col1, col2, col3 = st.columns([1, 1, 1])
-        with col2:
-            if st.button("Continue to Explorer →", use_container_width=True):
-                with st.spinner("Loading proteome data..."):
-                    st.session_state.loaded_data = load_data_for_species(tuple(sorted(species_list)))
-                st.session_state.screen = 'explorer'
-                st.rerun()
-
-            if st.button("← Back to Selection", use_container_width=True):
-                st.session_state.screen = 'selection'
-                st.rerun()
+        # No animation available - go directly to explorer
+        st.info("Animation not available for this species combination. Loading explorer...")
+        time.sleep(1)
+        st.session_state.screen = 'explorer'
+        st.rerun()
 
 
 def explorer_screen():
-    """Render the interactive explorer screen"""
+    """Render the interactive explorer screen with legend panel"""
     st.markdown('<h1 class="main-title">Proteome Space Explorer</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="description">Interactive UMAP embedding - hover over points to explore proteins</p>', unsafe_allow_html=True)
+    st.markdown('<p class="description">Interactive UMAP embedding - use lasso or box select to explore proteins</p>', unsafe_allow_html=True)
 
     # Ensure data is loaded
     if st.session_state.loaded_data is None:
@@ -539,52 +535,68 @@ def explorer_screen():
         with st.spinner("Loading data..."):
             st.session_state.loaded_data = load_data_for_species(tuple(sorted(species_list)))
 
-    # Sidebar controls
-    with st.sidebar:
-        st.markdown('<p class="section-title">Controls</p>', unsafe_allow_html=True)
+    # Main layout: Plot on left, controls on right
+    col_plot, col_controls = st.columns([3, 1])
 
-        if st.button("← Back to Selection", use_container_width=True):
+    with col_controls:
+        # Back button
+        if st.button("← New Selection", use_container_width=True):
             st.session_state.screen = 'selection'
             st.session_state.loaded_data = None
+            st.session_state.selected_species = []
             st.rerun()
 
-        st.markdown("---")
+        st.markdown("<br>", unsafe_allow_html=True)
 
-        st.markdown('<p class="section-title">Visualization</p>', unsafe_allow_html=True)
-        point_size = st.slider("Point Size", 1, 10, 4)
-        opacity = st.slider("Opacity", 0.1, 1.0, 0.7, 0.1)
+        # Legend
+        st.markdown('<p class="section-title">Species Legend</p>', unsafe_allow_html=True)
 
-        st.markdown("---")
-
-        st.markdown('<p class="section-title">Legend</p>', unsafe_allow_html=True)
         for species_data in st.session_state.loaded_data:
             species = species_data['name']
             color = species_data['color']
             display_name = SPECIES_DATA[species]['display_name']
-            st.markdown(f"<p style='color: {color}; margin: 5px 0;'>● {display_name}</p>", unsafe_allow_html=True)
+            count = len(species_data['df'])
 
-        st.markdown("---")
+            st.markdown(f"""
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: {color};"></div>
+                    <div>
+                        <span class="legend-text">{display_name}</span>
+                        <br>
+                        <span style="color: #a8dadc; font-size: 11px; font-family: 'JetBrains Mono', monospace;">{count:,} proteins</span>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
 
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Visualization controls
+        st.markdown('<p class="section-title">Visualization</p>', unsafe_allow_html=True)
+        point_size = st.slider("Point Size", 1, 10, 4, key="point_size")
+        opacity = st.slider("Opacity", 0.1, 1.0, 0.7, 0.1, key="opacity")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Statistics
         st.markdown('<p class="section-title">Statistics</p>', unsafe_allow_html=True)
         total_proteins = sum(len(d['df']) for d in st.session_state.loaded_data)
         st.metric("Total Proteins", f"{total_proteins:,}")
-        st.metric("Species", len(st.session_state.loaded_data))
 
-    # Main plot
-    fig = create_umap_plot(st.session_state.loaded_data, point_size, opacity)
+    with col_plot:
+        # Create and display plot
+        fig = create_umap_plot(st.session_state.loaded_data, point_size, opacity)
 
-    selected_points = st.plotly_chart(
-        fig,
-        use_container_width=True,
-        key="umap_plot",
-        on_select="rerun",
-        selection_mode=["points", "lasso", "box"]
-    )
+        selected_points = st.plotly_chart(
+            fig,
+            use_container_width=True,
+            key="umap_plot",
+            on_select="rerun",
+            selection_mode=["points", "lasso", "box"]
+        )
 
-    # Protein selection
+    # Protein selection table (full width below)
     st.markdown("---")
     st.markdown('<p class="section-title">Selected Proteins</p>', unsafe_allow_html=True)
-    st.caption("Use lasso or box select on the plot to view protein details")
 
     if selected_points and selected_points.selection and len(selected_points.selection.points) > 0:
         selected_data = []
@@ -617,7 +629,7 @@ def explorer_screen():
             csv = df_display.to_csv(index=False)
             st.download_button("📥 Download as CSV", csv, "selected_proteins.csv", "text/csv")
     else:
-        st.info("No proteins selected. Click or drag on the plot to select proteins.")
+        st.info("No proteins selected. Use lasso or box select on the plot to view protein details.")
 
 
 # Main app routing
