@@ -453,7 +453,7 @@ def selection_screen():
 
 
 def animation_screen():
-    """Render the animation screen - plays once then shows frozen frame before transitioning"""
+    """Render the animation screen - plays once then transitions directly to explorer"""
     species_list = st.session_state.selected_species
     gif_path, last_frame_path, gif_exists, last_frame_exists = get_animation_paths(species_list)
 
@@ -474,9 +474,9 @@ def animation_screen():
 
     elapsed = time.time() - st.session_state.animation_started
 
-    # Phase logic
+    # Show animation until it completes, then go directly to explorer
     if elapsed < ANIMATION_DURATION:
-        # Phase 1: Show animated GIF
+        # Show animated GIF
         st.markdown('<h1 class="main-title">Proteome Space Transformation</h1>', unsafe_allow_html=True)
         st.markdown('<p class="description">Watch as species silhouettes morph into their UMAP protein embeddings</p>', unsafe_allow_html=True)
 
@@ -501,41 +501,10 @@ def animation_screen():
         time.sleep(0.3)
         st.rerun()
 
-    elif elapsed < ANIMATION_DURATION + 2.0:
-        # Phase 2: Show frozen last frame for 2 seconds
-        st.markdown('<h1 class="main-title">Proteome Space Transformation</h1>', unsafe_allow_html=True)
-        st.markdown('<p class="description">Transformation complete</p>', unsafe_allow_html=True)
-
-        col1, col2, col3 = st.columns([1, 3, 1])
-        with col2:
-            if last_frame_exists:
-                frame_base64 = get_image_base64(last_frame_path)
-            else:
-                frame_base64 = get_image_base64(gif_path)
-
-            st.markdown(f"""
-                <div class="animation-frame fade-in" style="
-                    background: #fafafa;
-                    border-radius: 16px;
-                    padding: 20px;
-                    border: 1px solid rgba(100, 255, 218, 0.3);
-                    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4), 0 0 30px rgba(100, 255, 218, 0.2);
-                ">
-                    <img src="{frame_base64}" style="max-width: 100%; max-height: 65vh; border-radius: 8px;">
-                </div>
-                <p style="text-align: center; color: #64ffda; margin-top: 20px; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
-                    ✓ UMAP embedding complete — entering explorer...
-                </p>
-            """, unsafe_allow_html=True)
-
-        time.sleep(0.3)
-        st.rerun()
-
     else:
-        # Phase 3: Transition to explorer
+        # Animation complete - go directly to explorer
         st.session_state.screen = 'explorer'
         st.session_state.animation_started = None
-        st.session_state.animation_phase = 'playing'
         st.rerun()
 
 
