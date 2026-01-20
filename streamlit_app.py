@@ -20,40 +20,41 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Species configuration
+# Species configuration - COLORS MUST MATCH animation (animal_morph.py)
+# Animation uses: sealion=red, bottlenose=blue, graywhale=green, orca=purple, harborseal=orange
 SPECIES_DATA = {
     'Sea Lion': {
         'csv': 'umap_output/sealion_umap.csv',
         'image': 'animal_pics/sealion.png',
-        'color': '#e63946',
+        'color': '#FF0000',  # Red - matches animation
         'display_name': 'California Sea Lion',
         'key': 'sealion'
     },
     'Bottlenose Dolphin': {
         'csv': 'umap_output/bottlenose_umap.csv',
         'image': 'animal_pics/bottlenose.png',
-        'color': '#64ffda',
+        'color': '#0066FF',  # Blue - matches animation
         'display_name': 'Bottlenose Dolphin',
         'key': 'bottlenose'
     },
     'Gray Whale': {
         'csv': 'umap_output/graywhale_umap.csv',
         'image': 'animal_pics/graywhale.png',
-        'color': '#ffd166',
+        'color': '#00CC00',  # Green - matches animation
         'display_name': 'Gray Whale',
         'key': 'graywhale'
     },
     'Orca': {
         'csv': 'umap_output/orca_umap.csv',
         'image': 'animal_pics/orca.png',
-        'color': '#a8dadc',
+        'color': '#8000FF',  # Purple - matches animation
         'display_name': 'Orca (Killer Whale)',
         'key': 'orca'
     },
     'Harbor Seal': {
         'csv': 'umap_output/harborseal_umap.csv',
         'image': 'animal_pics/harbor_seal.png',
-        'color': '#06d6a0',
+        'color': '#FF8000',  # Orange - matches animation
         'display_name': 'Harbor Seal',
         'key': 'harborseal'
     }
@@ -149,14 +150,6 @@ st.markdown("""
         border: 1px solid rgba(100, 100, 100, 0.2) !important;
     }
 
-    /* Control panel styling */
-    .control-panel {
-        background: rgba(10, 25, 47, 0.8);
-        border: 1px solid rgba(100, 255, 218, 0.2);
-        border-radius: 16px;
-        padding: 20px;
-    }
-
     /* Slider styling */
     .stSlider > div > div > div > div {
         background: #64ffda !important;
@@ -212,6 +205,26 @@ st.markdown("""
         font-family: 'Inter', sans-serif;
         font-size: 13px;
     }
+
+    /* Fade-in animation for smooth transitions */
+    @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+    }
+
+    .fade-in {
+        animation: fadeIn 0.5s ease-in;
+    }
+
+    /* Animation container with dark background matching animation */
+    .animation-frame {
+        background: #fafafa;
+        border-radius: 12px;
+        padding: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -224,6 +237,8 @@ if 'loaded_data' not in st.session_state:
     st.session_state.loaded_data = None
 if 'animation_started' not in st.session_state:
     st.session_state.animation_started = None
+if 'animation_phase' not in st.session_state:
+    st.session_state.animation_phase = 'playing'  # 'playing', 'frozen', 'transitioning'
 
 
 def get_image_base64(image_path):
@@ -340,12 +355,12 @@ def create_umap_plot(loaded_data, point_size, opacity):
         xaxis=dict(range=[-350, 350], showgrid=False, zeroline=False, visible=False),
         yaxis=dict(range=[-350, 350], showgrid=False, zeroline=False, visible=False,
                    scaleanchor="x", scaleratio=1),
-        plot_bgcolor='rgba(10, 25, 47, 0.95)',
+        plot_bgcolor='#fafafa',  # Match animation background
         paper_bgcolor='rgba(10, 25, 47, 0)',
         hovermode='closest',
         dragmode='lasso',
         clickmode='event+select',
-        showlegend=False,  # We'll show legend in the control panel instead
+        showlegend=False,
         margin=dict(l=20, r=20, t=20, b=20),
         hoverlabel=dict(
             bgcolor='rgba(10, 25, 47, 0.95)',
@@ -374,12 +389,10 @@ def selection_screen():
         is_selected = species in st.session_state.selected_species
 
         with cols[idx]:
-            # Create card container
             border_color = info['color'] if is_selected else 'rgba(255, 255, 255, 0.1)'
             bg_color = 'rgba(255, 255, 255, 0.08)' if is_selected else 'rgba(255, 255, 255, 0.03)'
             shadow = f'0 10px 30px {info["color"]}40' if is_selected else 'none'
 
-            # Get image as base64
             img_path = Path(info['image'])
             img_base64 = get_image_base64(str(img_path)) if img_path.exists() else None
 
@@ -407,7 +420,6 @@ def selection_screen():
                 </div>
             """, unsafe_allow_html=True)
 
-            # Toggle button
             btn_label = "✓ Selected" if is_selected else "Select"
             if st.button(btn_label, key=f"btn_{species}", use_container_width=True):
                 if species in st.session_state.selected_species:
@@ -418,7 +430,6 @@ def selection_screen():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Selected organisms summary
     st.markdown('<p class="section-title" style="text-align: center;">Selected Organisms</p>', unsafe_allow_html=True)
 
     if st.session_state.selected_species:
@@ -432,104 +443,108 @@ def selection_screen():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Analyze button
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         if st.button("🔬 Analyze Proteomes", disabled=len(st.session_state.selected_species) == 0, use_container_width=True):
-            st.session_state.animation_started = None  # Reset animation timer
+            st.session_state.animation_started = None
+            st.session_state.animation_phase = 'playing'
             st.session_state.screen = 'animation'
             st.rerun()
 
 
 def animation_screen():
-    """Render the animation screen - plays once then transitions"""
-    st.markdown('<h1 class="main-title">Proteome Space Transformation</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="description">Watch as species silhouettes morph into their UMAP protein embeddings</p>', unsafe_allow_html=True)
-
+    """Render the animation screen - plays once then shows frozen frame before transitioning"""
     species_list = st.session_state.selected_species
-
-    # Get animation paths
     gif_path, last_frame_path, gif_exists, last_frame_exists = get_animation_paths(species_list)
 
-    # Start loading data in background
+    # Pre-load data while showing animation
     if st.session_state.loaded_data is None:
-        with st.spinner(""):
-            st.session_state.loaded_data = load_data_for_species(tuple(sorted(species_list)))
+        st.session_state.loaded_data = load_data_for_species(tuple(sorted(species_list)))
 
-    if gif_exists:
-        # Track when animation started
-        if st.session_state.animation_started is None:
-            st.session_state.animation_started = time.time()
+    if not gif_exists:
+        st.info("Animation not available for this combination. Loading explorer...")
+        time.sleep(0.5)
+        st.session_state.screen = 'explorer'
+        st.rerun()
+        return
 
-        elapsed = time.time() - st.session_state.animation_started
-        animation_finished = elapsed >= ANIMATION_DURATION
+    # Track animation timing
+    if st.session_state.animation_started is None:
+        st.session_state.animation_started = time.time()
+
+    elapsed = time.time() - st.session_state.animation_started
+
+    # Phase logic
+    if elapsed < ANIMATION_DURATION:
+        # Phase 1: Show animated GIF
+        st.markdown('<h1 class="main-title">Proteome Space Transformation</h1>', unsafe_allow_html=True)
+        st.markdown('<p class="description">Watch as species silhouettes morph into their UMAP protein embeddings</p>', unsafe_allow_html=True)
 
         col1, col2, col3 = st.columns([1, 3, 1])
         with col2:
-            if not animation_finished:
-                # Show animated GIF
-                gif_base64 = get_image_base64(gif_path)
-                st.markdown(f"""
-                    <div style="
-                        background: rgba(0, 0, 0, 0.4);
-                        border-radius: 20px;
-                        padding: 30px;
-                        text-align: center;
-                        border: 1px solid rgba(100, 255, 218, 0.2);
-                        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
-                    ">
-                        <img src="{gif_base64}" style="max-width: 100%; max-height: 60vh; border-radius: 12px;">
-                    </div>
-                    <p style="text-align: center; color: #64ffda; margin-top: 20px; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
-                        Transforming proteome space...
-                    </p>
-                """, unsafe_allow_html=True)
+            gif_base64 = get_image_base64(gif_path)
+            st.markdown(f"""
+                <div class="animation-frame" style="
+                    background: #fafafa;
+                    border-radius: 16px;
+                    padding: 20px;
+                    border: 1px solid rgba(100, 255, 218, 0.2);
+                    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+                ">
+                    <img src="{gif_base64}" style="max-width: 100%; max-height: 65vh; border-radius: 8px;">
+                </div>
+                <p style="text-align: center; color: #64ffda; margin-top: 20px; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
+                    Transforming proteome space...
+                </p>
+            """, unsafe_allow_html=True)
 
-                # Auto-refresh to check if animation is done
-                time.sleep(0.5)
-                st.rerun()
+        time.sleep(0.3)
+        st.rerun()
+
+    elif elapsed < ANIMATION_DURATION + 2.0:
+        # Phase 2: Show frozen last frame for 2 seconds
+        st.markdown('<h1 class="main-title">Proteome Space Transformation</h1>', unsafe_allow_html=True)
+        st.markdown('<p class="description">Transformation complete</p>', unsafe_allow_html=True)
+
+        col1, col2, col3 = st.columns([1, 3, 1])
+        with col2:
+            if last_frame_exists:
+                frame_base64 = get_image_base64(last_frame_path)
             else:
-                # Show frozen last frame
-                if last_frame_exists:
-                    frame_base64 = get_image_base64(last_frame_path)
-                else:
-                    frame_base64 = get_image_base64(gif_path)  # Fallback to gif
+                frame_base64 = get_image_base64(gif_path)
 
-                st.markdown(f"""
-                    <div style="
-                        background: rgba(0, 0, 0, 0.4);
-                        border-radius: 20px;
-                        padding: 30px;
-                        text-align: center;
-                        border: 1px solid rgba(100, 255, 218, 0.2);
-                        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
-                    ">
-                        <img src="{frame_base64}" style="max-width: 100%; max-height: 60vh; border-radius: 12px;">
-                    </div>
-                    <p style="text-align: center; color: #64ffda; margin-top: 20px; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
-                        ✓ Transformation complete! Loading explorer...
-                    </p>
-                """, unsafe_allow_html=True)
+            st.markdown(f"""
+                <div class="animation-frame fade-in" style="
+                    background: #fafafa;
+                    border-radius: 16px;
+                    padding: 20px;
+                    border: 1px solid rgba(100, 255, 218, 0.3);
+                    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4), 0 0 30px rgba(100, 255, 218, 0.2);
+                ">
+                    <img src="{frame_base64}" style="max-width: 100%; max-height: 65vh; border-radius: 8px;">
+                </div>
+                <p style="text-align: center; color: #64ffda; margin-top: 20px; font-family: 'JetBrains Mono', monospace; font-size: 12px;">
+                    ✓ UMAP embedding complete — entering explorer...
+                </p>
+            """, unsafe_allow_html=True)
 
-                # Brief pause to show the frozen frame, then transition
-                time.sleep(1.5)
-                st.session_state.screen = 'explorer'
-                st.session_state.animation_started = None
-                st.rerun()
+        time.sleep(0.3)
+        st.rerun()
+
     else:
-        # No animation available - go directly to explorer
-        st.info("Animation not available for this species combination. Loading explorer...")
-        time.sleep(1)
+        # Phase 3: Transition to explorer
         st.session_state.screen = 'explorer'
+        st.session_state.animation_started = None
+        st.session_state.animation_phase = 'playing'
         st.rerun()
 
 
 def explorer_screen():
     """Render the interactive explorer screen with legend panel"""
+    st.markdown('<div class="fade-in">', unsafe_allow_html=True)
     st.markdown('<h1 class="main-title">Proteome Space Explorer</h1>', unsafe_allow_html=True)
     st.markdown('<p class="description">Interactive UMAP embedding - use lasso or box select to explore proteins</p>', unsafe_allow_html=True)
 
-    # Ensure data is loaded
     if st.session_state.loaded_data is None:
         species_list = st.session_state.selected_species
         with st.spinner("Loading data..."):
@@ -539,7 +554,6 @@ def explorer_screen():
     col_plot, col_controls = st.columns([3, 1])
 
     with col_controls:
-        # Back button
         if st.button("← New Selection", use_container_width=True):
             st.session_state.screen = 'selection'
             st.session_state.loaded_data = None
@@ -583,7 +597,6 @@ def explorer_screen():
         st.metric("Total Proteins", f"{total_proteins:,}")
 
     with col_plot:
-        # Create and display plot
         fig = create_umap_plot(st.session_state.loaded_data, point_size, opacity)
 
         selected_points = st.plotly_chart(
@@ -594,7 +607,9 @@ def explorer_screen():
             selection_mode=["points", "lasso", "box"]
         )
 
-    # Protein selection table (full width below)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Protein selection table
     st.markdown("---")
     st.markdown('<p class="section-title">Selected Proteins</p>', unsafe_allow_html=True)
 
