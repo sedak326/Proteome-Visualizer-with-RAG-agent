@@ -23,11 +23,8 @@ ENV HOME=/home/user \
 
 WORKDIR /app
 
-# Expose port 8501 (Streamlit default)
-EXPOSE 8501
+# Expose port 7860 (Hugging Face Spaces default)
+EXPOSE 7860
 
-# Health check
-HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
-
-# Run the Streamlit app
-CMD ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Run the Dash app
+CMD ["python", "proteome_explorer_ux2.py"]
