@@ -1,33 +1,11 @@
-# Virtual environment
-venv/
-env/
-.venv/
-
-# Python cache
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
+*.pyc
 
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Temporary files
-*.tmp
-*.temp
-
-# Claude Code
-.claude/
-nul
+# Large binary data files
+h5py_files/*.h5
+fastafiles/*.fasta
+fastafiles/*.fasta.gz
+fastafiles/*.faa
+fastafiles/__pycache__/
+fastafiles/no_isoforms/
+fastafiles/split/
