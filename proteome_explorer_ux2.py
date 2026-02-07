@@ -5,7 +5,7 @@ Deep sea ocean theme with bioluminescent accents
 """
 
 import dash
-from dash import dcc, html, Input, Output, State, dash_table
+from dash import dcc, html, Input, Output, State, ctx, dash_table
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
@@ -14,9 +14,173 @@ from pathlib import Path
 import base64
 import subprocess
 import sys
+import requests
+from openai import OpenAI as OpenAIClient
 
 # Resolve all paths relative to this script, not the working directory
 BASE_DIR = Path(__file__).resolve().parent
+
+# RAG Chat Configuration
+RAG_API_URL = "http://localhost:8000/v1/run"
+_openai_client = OpenAIClient()
+
+
+def build_visual_context(active_species, selected_data):
+    """Build a text summary of what's currently on screen."""
+    parts = []
+    active_species = active_species or []
+
+    if active_species:
+        names = [SPECIES_DATA[s]['display_name'] for s in active_species if s in SPECIES_DATA]
+        parts.append(f"Species displayed: {', '.join(names)}")
+
+    if selected_data and selected_data.get('points'):
+        active_ordered = [s for s in SPECIES_DATA.keys() if s in active_species]
+
+        # Build cluster→species map to determine unique vs shared
+        cluster_species = {}
+        for point in selected_data['points']:
+            hover = point.get('text', '')
+            cl = ''
+            if 'Cluster:' in hover:
+                cl = hover.split('Cluster:')[-1].strip().split('<')[0].strip()
+            if cl:
+                curve_num = point.get('curveNumber', 0)
+                if curve_num < len(active_ordered):
+                    cluster_species.setdefault(cl, set()).add(active_ordered[curve_num])
+
+        proteins = []
+        for point in selected_data['points'][:15]:
+            curve_num = point.get('curveNumber', 0)
+            if curve_num >= len(active_ordered):
+                continue
+            species = active_ordered[curve_num]
+            customdata = point.get('customdata', [])
+            if not customdata:
+                continue
+            entry_id = str(customdata[0])
+            ann = ANNOTATIONS.get(entry_id, {})
+            desc = ann.get('desc', '').split(' OS=')[0].strip() or 'Unknown'
+            domains = ann.get('hmm_labels', '') or 'None'
+            hmm_desc = ann.get('hmm_descriptions', '') or ''
+            x = round(point.get('x', 0), 1)
+            y = round(point.get('y', 0), 1)
+            # Get cluster label and unique/shared tag from the point's text hover data
+            cluster = point.get('text', '')
+            cluster_label = ''
+            if 'Cluster:' in cluster:
+                cluster_label = cluster.split('Cluster:')[-1].strip().split('<')[0].strip()
+            # Look up filter tag from loaded data via the point
+            filter_tag = point.get('filter_tag', '')
+            line = f"- {entry_id} ({SPECIES_DATA[species]['display_name']}): {desc[:80]}, UMAP=({x},{y})"
+            if cluster_label:
+                sharing = "unique" if len(cluster_species.get(cluster_label, set())) == 1 else "shared"
+                line += f", Cluster: {cluster_label} ({sharing})"
+            line += f", Domains: {domains[:60]}"
+            if hmm_desc:
+                line += f", Function: {hmm_desc[:80]}"
+            proteins.append(line)
+        if proteins:
+            total = len(selected_data['points'])
+            parts.append(f"Selected proteins ({total}):\n" + "\n".join(proteins))
+
+    return "\n".join(parts) if parts else ""
+
+
+def route_message(chat_history, new_message, visual_context=""):
+    """Classify the message and route to RAG, visual context, or conversational reply.
+
+    Returns (mode, text):
+        ("rag", standalone_query) - send to RAG pipeline
+        ("visual", question)     - answer using current screen context
+        ("chat", direct_reply)   - return directly, no retrieval needed
+    """
+    context = "\n".join(
+        f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+        for m in (chat_history or [])[-6:]
+    )
+    user_content = f"Conversation:\n{context}\n\n"
+    if visual_context:
+        user_content += f"Currently on screen:\n{visual_context}\n\n"
+    user_content += f"Latest message: {new_message}"
+    try:
+        resp = _openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": (
+                    "You are a router for a marine biology knowledge assistant on a proteome "
+                    "visualization portal. Given a conversation, what the user sees on screen, "
+                    "and their latest message, decide:\n"
+                    "- QUERY: <standalone question> — needs knowledge database lookup (general "
+                    "biology questions, facts not visible on screen)\n"
+                    "- VISUAL: <the question> — asks about what's currently displayed: selected "
+                    "proteins, clusters, species comparisons on screen, patterns in the plot, "
+                    "'explain what I see', 'what do these have in common', etc.\n"
+                    "- CHAT: <brief friendly reply> — conversational (greeting, reaction, thanks)\n"
+                    "Output only one line starting with QUERY:, VISUAL:, or CHAT:"
+                )},
+                {"role": "user", "content": user_content}
+            ],
+            temperature=0,
+            max_tokens=200,
+        )
+        result = resp.choices[0].message.content.strip()
+        if result.startswith("QUERY:"):
+            return ("rag", result[6:].strip())
+        elif result.startswith("VISUAL:"):
+            return ("visual", result[7:].strip())
+        elif result.startswith("CHAT:"):
+            return ("chat", result[5:].strip())
+        else:
+            return ("rag", new_message)
+    except Exception:
+        return ("rag", new_message)
+
+
+def answer_with_context(question, visual_context, chat_history):
+    """Answer a question about what the user sees on screen using GPT directly."""
+    messages = [
+        {"role": "system", "content": (
+            "You are a marine biology assistant on a proteome visualization portal. "
+            "The user is viewing a UMAP plot where each dot is a protein, colored by species. "
+            "Proteins that cluster together share structural or functional similarity. "
+            "Answer the user's question about what they see. Be concise (2-3 sentences). "
+            "Explain biological significance in plain language. Don't list raw IDs."
+        )}
+    ]
+    for msg in (chat_history or [])[-4:]:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": f"On my screen:\n{visual_context}\n\nQuestion: {question}"})
+    try:
+        resp = _openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.3,
+            max_tokens=200,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+def query_rag(query_text):
+    """Query the AutoRAG API and return the answer."""
+    try:
+        r = requests.post(RAG_API_URL, json={"query": query_text}, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, str):
+            return data
+        if isinstance(data, dict):
+            result = data.get("result", "")
+            if isinstance(result, list):
+                return result[0] if result else "No answer generated."
+            return str(result)
+        return str(data)
+    except requests.exceptions.ConnectionError:
+        return "The knowledge base service is not running. Start it with: autorag run_api --trial_dir /home/skavlak/AI_Agent/evals/eval_run_1/0"
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 # Ocean-inspired color palette
 OCEAN_COLORS = {
@@ -37,48 +201,48 @@ SPECIES_DATA = {
     'Sea Lion': {
         'csv': str(BASE_DIR / 'umap_output/California Sealion_umap.csv'),
         'image': str(BASE_DIR / 'animal_pics/sealion.png'),
-        'color': '#FF0000',
-        'glow': 'rgba(255, 0, 0, 0.4)',
+        'color': '#E6194B',
+        'glow': 'rgba(230, 25, 75, 0.4)',
         'display_name': 'California Sea Lion',
         'key': 'sealion'
     },
     'Bottlenose Dolphin': {
         'csv': str(BASE_DIR / 'umap_output/Bottlenose Dolphin_umap.csv'),
         'image': str(BASE_DIR / 'animal_pics/bottlenose.png'),
-        'color': '#0000FF',
-        'glow': 'rgba(0, 0, 255, 0.4)',
+        'color': '#4363D8',
+        'glow': 'rgba(67, 99, 216, 0.4)',
         'display_name': 'Bottlenose Dolphin',
         'key': 'bottlenose'
     },
     'Gray Whale': {
         'csv': str(BASE_DIR / 'umap_output/Graywhale_umap.csv'),
         'image': str(BASE_DIR / 'animal_pics/graywhale.png'),
-        'color': '#00CC00',
-        'glow': 'rgba(0, 204, 0, 0.4)',
+        'color': '#3CB44B',
+        'glow': 'rgba(60, 180, 75, 0.4)',
         'display_name': 'Gray Whale',
         'key': 'graywhale'
     },
     'Orca': {
         'csv': str(BASE_DIR / 'umap_output/Killer whale_umap.csv'),
         'image': str(BASE_DIR / 'animal_pics/orca.png'),
-        'color': '#8000FF',
-        'glow': 'rgba(128, 0, 255, 0.4)',
+        'color': '#F032E6',
+        'glow': 'rgba(240, 50, 230, 0.4)',
         'display_name': 'Orca (Killer Whale)',
         'key': 'orca'
     },
     'Harbor Seal': {
         'csv': str(BASE_DIR / 'umap_output/Harborseal_umap.csv'),
         'image': str(BASE_DIR / 'animal_pics/harbor_seal.png'),
-        'color': '#FF8000',
-        'glow': 'rgba(255, 128, 0, 0.4)',
+        'color': '#9A6324',
+        'glow': 'rgba(154, 99, 36, 0.4)',
         'display_name': 'Harbor Seal',
         'key': 'harborseal'
     },
     'King Cobra': {
         'csv': str(BASE_DIR / 'umap_output/King Cobra_umap.csv'),
         'image': str(BASE_DIR / 'animal_pics/cobra.png'),
-        'color': '#00CCCC',
-        'glow': 'rgba(0, 204, 204, 0.4)',
+        'color': '#BFAA00',
+        'glow': 'rgba(191, 170, 0, 0.4)',
         'display_name': 'King Cobra',
         'key': 'cobra'
     }
@@ -98,7 +262,8 @@ ANNOTATION_FILES = {
 
 def load_annotations():
     """Load annotation data from all annotated CSVs into a global lookup dict."""
-    cols = ['ident', 'clipDescription', 'hmm_labels', 'hmm_descriptions',
+    cols = ['ident', 'desc', 'sequence', 'clipDescription',
+            'hmm_labels', 'hmm_pfam_ids', 'hmm_ranges', 'hmm_descriptions',
             'annotationConfidence', 'percentIdentity', 'queryCoverage',
             'order', 'family', 'genus']
     value_cols = [c for c in cols if c != 'ident']
@@ -500,6 +665,41 @@ app.index_string = '''
             .modebar-btn { color: #a8dadc !important; }
             .modebar-btn:hover { color: #64ffda !important; }
             .modebar-btn.active { color: #64ffda !important; }
+            /* Chat widget */
+            .chat-toggle { position: fixed; bottom: 30px; right: 30px; width: 56px; height: 56px;
+                border-radius: 50%; background: linear-gradient(135deg, #64ffda, #457b9d); border: none;
+                cursor: pointer; box-shadow: 0 4px 20px rgba(100, 255, 218, 0.4); z-index: 1000;
+                font-size: 14px; font-weight: 600; color: #0a192f; font-family: "Inter", sans-serif;
+                transition: all 0.3s ease; letter-spacing: 0.5px; }
+            .chat-toggle:hover { transform: scale(1.1); box-shadow: 0 6px 30px rgba(100, 255, 218, 0.6); }
+            .chat-panel { position: fixed; bottom: 100px; right: 30px; width: 420px; height: 520px;
+                background: rgba(10, 25, 47, 0.97); backdrop-filter: blur(20px);
+                border: 1px solid rgba(100, 255, 218, 0.2); border-radius: 16px;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5); z-index: 999;
+                display: flex; flex-direction: column; overflow: hidden; }
+            .chat-header { padding: 16px 20px; background: rgba(100, 255, 218, 0.08);
+                border-bottom: 1px solid rgba(100, 255, 218, 0.15); color: #64ffda;
+                font-family: "JetBrains Mono", monospace; font-size: 12px;
+                letter-spacing: 2px; text-transform: uppercase; font-weight: 500; }
+            .chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex;
+                flex-direction: column; gap: 12px; }
+            .chat-msg { max-width: 85%; padding: 10px 14px; border-radius: 12px;
+                font-family: "Inter", sans-serif; font-size: 13px; line-height: 1.5; word-wrap: break-word; }
+            .chat-msg-user { align-self: flex-end; background: rgba(100, 255, 218, 0.15);
+                color: #f1faee; border: 1px solid rgba(100, 255, 218, 0.2); border-bottom-right-radius: 4px; }
+            .chat-msg-assistant { align-self: flex-start; background: rgba(255, 255, 255, 0.05);
+                color: #a8dadc; border: 1px solid rgba(255, 255, 255, 0.1); border-bottom-left-radius: 4px; }
+            .chat-input-area { padding: 12px 16px; border-top: 1px solid rgba(100, 255, 218, 0.15);
+                display: flex; gap: 8px; align-items: center; }
+            .chat-input-area input { flex: 1; padding: 10px 14px; background: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(100, 255, 218, 0.2); border-radius: 10px; color: #f1faee;
+                font-family: "Inter", sans-serif; font-size: 13px; outline: none; }
+            .chat-input-area input:focus { border-color: #64ffda; box-shadow: 0 0 10px rgba(100, 255, 218, 0.2); }
+            .chat-input-area input::placeholder { color: #457b9d; }
+            .chat-send-btn { padding: 10px 16px; background: rgba(100, 255, 218, 0.15); border: 1px solid #64ffda;
+                border-radius: 10px; color: #64ffda; cursor: pointer; font-family: "JetBrains Mono", monospace;
+                font-size: 12px; font-weight: 500; transition: all 0.2s ease; }
+            .chat-send-btn:hover { background: rgba(100, 255, 218, 0.3); }
         </style>
     </head>
     <body>
@@ -532,6 +732,9 @@ app.index_string = '''
 app.layout = html.Div([
     dcc.Store(id='loaded-data', data=None),
     dcc.Store(id='selected-species-store', data=[]),
+    dcc.Store(id='active-species-store', data=[]),
+    dcc.Store(id='chat-history', data=[]),
+    dcc.Store(id='pending-query', data=None),
 
     # Screen 1: Species Selection
     html.Div([
@@ -663,125 +866,127 @@ app.layout = html.Div([
 
     # Screen 3: Interactive Explorer
     html.Div([
-        # Header
+        # Slim horizontal toolbar
         html.Div([
-            html.H2("Proteome Space Explorer",
-                   className='shimmer-text',
-                   style={'textAlign': 'center', 'marginBottom': 8,
-                         'fontFamily': '"Inter", sans-serif', 'fontWeight': '300',
-                         'fontSize': 32, 'letterSpacing': '1px'}),
-            html.P("Interactive UMAP embedding - hover and click to explore proteins",
-                  style={'textAlign': 'center', 'color': '#a8dadc', 'fontSize': 13,
-                        'marginBottom': 20, 'fontFamily': '"JetBrains Mono", monospace',
-                        'letterSpacing': '1px'}),
-        ]),
+            # Back button
+            html.Button('←', id='back-button', n_clicks=0,
+                       className='ocean-btn',
+                       style={'padding': '6px 12px',
+                             'backgroundColor': 'transparent', 'color': '#64ffda',
+                             'border': '1px solid rgba(100, 255, 218, 0.3)',
+                             'borderRadius': 8,
+                             'cursor': 'pointer', 'fontFamily': '"JetBrains Mono", monospace',
+                             'fontSize': 14, 'fontWeight': '500',
+                             'lineHeight': '1', 'flexShrink': '0'}),
 
-        # Main content: Plot on left, Controls on right
-        html.Div([
-            # Left side - Plot
+            # Separator
+            html.Div(style={'width': 1, 'height': 28, 'background': 'rgba(100, 255, 218, 0.2)',
+                           'flexShrink': '0'}),
+
+            # Species toggle buttons
             html.Div([
-                dcc.Graph(id='interactive-graph',
-                         style={'height': '60vh', 'width': '100%'},
-                         config={'displayModeBar': True, 'displaylogo': False,
-                                'modeBarButtonsToRemove': ['select2d', 'lasso2d']})
-            ], style={'flex': '1', 'minWidth': '0', 'background': '#ffffff',
-                     'borderRadius': 16, 'padding': 10,
-                     'boxShadow': '0 10px 40px rgba(0, 0, 0, 0.2)',
-                     'border': '1px solid rgba(100, 255, 218, 0.2)'}),
+                html.Button([
+                    html.Img(src=animal_icons.get(species, ''),
+                             style={'width': '22px', 'height': '22px', 'objectFit': 'contain',
+                                    'filter': 'brightness(0) invert(1) opacity(0.9)',
+                                    'flexShrink': '0'}),
+                    html.Span(SPECIES_DATA[species]['display_name'],
+                              style={'fontSize': 10, 'fontWeight': '500',
+                                     'margin': 0, 'whiteSpace': 'nowrap',
+                                     'fontFamily': '"Inter", sans-serif'})
+                ], id=f'toggle-{species}', n_clicks=0,
+                   style={'display': 'inline-flex', 'alignItems': 'center', 'gap': '4px',
+                          'padding': '3px 8px', 'background': 'rgba(255, 255, 255, 0.05)',
+                          'borderRadius': 8, 'border': '1px solid rgba(255,255,255,0.15)',
+                          'cursor': 'pointer', 'opacity': 0.5,
+                          'color': '#a8dadc', 'transition': 'all 0.2s ease'})
+                for species in SPECIES_DATA
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '6px',
+                      'flexWrap': 'wrap', 'flexShrink': '1', 'minWidth': '0'}),
 
-            # Right side - Controls Panel
+            # Separator
+            html.Div(style={'width': 1, 'height': 28, 'background': 'rgba(100, 255, 218, 0.2)',
+                           'flexShrink': '0'}),
+
+            # Point Size slider
             html.Div([
-                html.Button('← Back to Selection', id='back-button', n_clicks=0,
-                           className='ocean-btn',
-                           style={'width': '100%', 'padding': '10px 15px', 'marginBottom': 20,
-                                 'backgroundColor': 'transparent', 'color': '#64ffda',
-                                 'border': '1px solid rgba(100, 255, 218, 0.3)',
-                                 'borderRadius': 20,
-                                 'cursor': 'pointer', 'fontFamily': '"JetBrains Mono", monospace',
-                                 'fontSize': 10, 'letterSpacing': '1px', 'fontWeight': '500',
-                                 'textTransform': 'uppercase'}),
-
-                html.H3("Selected Species",
-                       style={'color': '#64ffda', 'marginBottom': 12,
-                             'fontSize': 10, 'fontFamily': '"JetBrains Mono", monospace',
-                             'letterSpacing': '2px', 'textTransform': 'uppercase',
-                             'fontWeight': '500'}),
-
-                html.Div(id='selected-animals-display', style={'marginBottom': 20}),
-
-                html.Hr(style={'border': 'none', 'borderTop': '1px solid rgba(100, 255, 218, 0.15)',
-                              'margin': '15px 0'}),
-
-                html.H3("Visualization",
-                       style={'color': '#64ffda', 'marginBottom': 15,
-                             'fontSize': 10, 'fontFamily': '"JetBrains Mono", monospace',
-                             'letterSpacing': '2px', 'textTransform': 'uppercase',
-                             'fontWeight': '500'}),
-
+                html.Label("Size",
+                          style={'fontWeight': '500', 'fontSize': 10,
+                                'color': '#a8dadc', 'fontFamily': '"JetBrains Mono", monospace',
+                                'marginRight': 4, 'whiteSpace': 'nowrap', 'letterSpacing': '0.5px'}),
                 html.Div([
-                    html.Label("Point Size",
-                              style={'fontWeight': '500', 'fontSize': 11,
-                                    'color': '#a8dadc', 'fontFamily': '"Inter", sans-serif',
-                                    'marginBottom': 6, 'display': 'block'}),
                     dcc.Slider(id='point-size', min=1, max=10, value=3, step=1,
-                              marks={1: {'label': '1', 'style': {'color': '#a8dadc', 'fontSize': '10px'}},
-                                    5: {'label': '5', 'style': {'color': '#a8dadc', 'fontSize': '10px'}},
-                                    10: {'label': '10', 'style': {'color': '#a8dadc', 'fontSize': '10px'}}})
-                ], style={'marginBottom': 20}),
+                              marks={1: {'label': '1', 'style': {'color': '#a8dadc', 'fontSize': '9px'}},
+                                    5: {'label': '5', 'style': {'color': '#a8dadc', 'fontSize': '9px'}},
+                                    10: {'label': '10', 'style': {'color': '#a8dadc', 'fontSize': '9px'}}})
+                ], style={'width': 120})
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '4px', 'flexShrink': '0'}),
 
+            # Opacity slider
+            html.Div([
+                html.Label("Opacity",
+                          style={'fontWeight': '500', 'fontSize': 10,
+                                'color': '#a8dadc', 'fontFamily': '"JetBrains Mono", monospace',
+                                'marginRight': 4, 'whiteSpace': 'nowrap', 'letterSpacing': '0.5px'}),
                 html.Div([
-                    html.Label("Opacity",
-                              style={'fontWeight': '500', 'fontSize': 11,
-                                    'color': '#a8dadc', 'fontFamily': '"Inter", sans-serif',
-                                    'marginBottom': 6, 'display': 'block'}),
-                    dcc.Slider(id='opacity', min=0.1, max=1.0, value=0.6, step=0.1,
-                              marks={0.1: {'label': '.1', 'style': {'color': '#a8dadc', 'fontSize': '10px'}},
-                                    0.5: {'label': '.5', 'style': {'color': '#a8dadc', 'fontSize': '10px'}},
-                                    1.0: {'label': '1', 'style': {'color': '#a8dadc', 'fontSize': '10px'}}})
-                ]),
+                    dcc.Slider(id='opacity', min=0.1, max=1.0, value=1.0, step=0.1,
+                              marks={0.1: {'label': '.1', 'style': {'color': '#a8dadc', 'fontSize': '9px'}},
+                                    0.5: {'label': '.5', 'style': {'color': '#a8dadc', 'fontSize': '9px'}},
+                                    1.0: {'label': '1', 'style': {'color': '#a8dadc', 'fontSize': '9px'}}})
+                ], style={'width': 120})
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '4px', 'flexShrink': '0'}),
 
-                html.Hr(style={'border': 'none', 'borderTop': '1px solid rgba(100, 255, 218, 0.15)',
-                              'margin': '15px 0'}),
+            # Separator
+            html.Div(style={'width': 1, 'height': 28, 'background': 'rgba(100, 255, 218, 0.2)',
+                           'flexShrink': '0'}),
 
-                html.Div([
-                    html.Label("Protein Filter",
-                              style={'fontWeight': '500', 'fontSize': 10,
-                                    'color': '#64ffda', 'fontFamily': '"JetBrains Mono", monospace',
-                                    'letterSpacing': '2px', 'textTransform': 'uppercase',
-                                    'marginBottom': 10, 'display': 'block'}),
-                    dcc.RadioItems(
-                        id='protein-filter',
-                        options=[
-                            {'label': 'ALL PROTEINS', 'value': 'all'},
-                            {'label': 'SPECIES-UNIQUE', 'value': 'unique'},
-                            {'label': 'SHARED ACROSS SPECIES', 'value': 'shared'}
-                        ],
-                        value='all',
-                        style={'fontFamily': '"JetBrains Mono", monospace', 'fontSize': 10,
-                               'letterSpacing': '0.5px'},
-                        labelStyle={'display': 'block', 'marginBottom': 8,
-                                    'color': '#a8dadc', 'cursor': 'pointer'},
-                        inputStyle={'marginRight': 8}
-                    ),
-                    html.Div(id='filter-count-display',
-                             style={'fontSize': 10, 'color': '#457b9d',
-                                    'fontFamily': '"JetBrains Mono", monospace',
-                                    'marginTop': 8, 'letterSpacing': '0.5px'})
-                ], id='protein-filter-container')
+            # Protein filter radio (inline)
+            html.Div([
+                dcc.RadioItems(
+                    id='protein-filter',
+                    options=[
+                        {'label': 'ALL', 'value': 'all'},
+                        {'label': 'UNIQUE', 'value': 'unique'},
+                        {'label': 'SHARED', 'value': 'shared'}
+                    ],
+                    value='all',
+                    style={'fontFamily': '"JetBrains Mono", monospace', 'fontSize': 10,
+                           'letterSpacing': '0.5px', 'display': 'flex', 'gap': '2px'},
+                    labelStyle={'display': 'inline-flex', 'alignItems': 'center',
+                                'color': '#a8dadc', 'cursor': 'pointer',
+                                'whiteSpace': 'nowrap'},
+                    inputStyle={'marginRight': 4}
+                ),
+            ], id='protein-filter-container',
+               style={'display': 'flex', 'alignItems': 'center', 'gap': '6px', 'flexShrink': '0'}),
 
-            ], className='glass-card',
-               style={'width': '260px', 'flexShrink': '0', 'padding': 20,
-                     'background': 'rgba(10, 25, 47, 0.9)',
-                     'backdropFilter': 'blur(15px)',
-                     'borderRadius': 16,
-                     'border': '1px solid rgba(100, 255, 218, 0.15)',
-                     'boxShadow': '0 15px 40px rgba(0, 0, 0, 0.3)',
-                     'marginLeft': 20})
+            # Filter count
+            html.Div(id='filter-count-display',
+                     style={'fontSize': 10, 'color': '#457b9d',
+                            'fontFamily': '"JetBrains Mono", monospace',
+                            'letterSpacing': '0.5px', 'whiteSpace': 'nowrap', 'flexShrink': '0'})
 
-        ], style={'display': 'flex', 'gap': '0', 'alignItems': 'flex-start',
-                 'maxWidth': '1400px', 'margin': '0 auto', 'padding': '0 30px'}),
+        ], className='glass-card',
+           style={'display': 'flex', 'alignItems': 'center', 'gap': '12px',
+                 'padding': '8px 16px',
+                 'background': 'rgba(10, 25, 47, 0.9)',
+                 'backdropFilter': 'blur(15px)',
+                 'borderRadius': 12,
+                 'border': '1px solid rgba(100, 255, 218, 0.15)',
+                 'boxShadow': '0 4px 20px rgba(0, 0, 0, 0.3)',
+                 'marginBottom': 10, 'flexWrap': 'wrap'}),
 
-        # Protein Selection Table - Below the plot
+        # Full-width Plot
+        html.Div([
+            dcc.Graph(id='interactive-graph',
+                     style={'height': 'calc(100vh - 200px)', 'width': '100%'},
+                     config={'displayModeBar': True, 'displaylogo': False})
+        ], style={'background': '#ffffff',
+                 'borderRadius': 16, 'padding': 10,
+                 'boxShadow': '0 10px 40px rgba(0, 0, 0, 0.2)',
+                 'border': '1px solid rgba(100, 255, 218, 0.2)'}),
+
+        # Protein Selection Table - Below the plot (full width)
         html.Div([
             html.Div([
                 html.H3("Selected Proteins",
@@ -803,17 +1008,52 @@ app.layout = html.Div([
                  'backdropFilter': 'blur(10px)',
                  'borderRadius': 16,
                  'border': '1px solid rgba(100, 255, 218, 0.1)',
-                 'boxShadow': '0 15px 40px rgba(0, 0, 0, 0.2)',
-                 'maxWidth': '1400px', 'margin': '20px auto 0', 'marginLeft': 30, 'marginRight': 30})
+                 'boxShadow': '0 15px 40px rgba(0, 0, 0, 0.2)'})
 
     ], id='explorer-screen', style={'display': 'none', 'fontFamily': '"Inter", sans-serif',
-                                    'padding': '20px 25px', 'backgroundColor': 'transparent', 'opacity': 0}),
+                                    'padding': '15px 20px', 'backgroundColor': 'transparent', 'opacity': 0}),
 
     dcc.Interval(id='animation-timer', interval=3400, disabled=True, n_intervals=0, max_intervals=1),
     dcc.Interval(id='fade-complete-timer', interval=800, disabled=True, n_intervals=0, max_intervals=1),
-    dcc.Store(id='animation-path-store', data=None)
+    dcc.Store(id='animation-path-store', data=None),
+
+    # Chat widget - floating toggle + panel
+    html.Button('AI', id='chat-toggle-btn', n_clicks=0, className='chat-toggle'),
+    html.Div([
+        html.Div("Marine Biology Assistant", className='chat-header'),
+        html.Div(
+            id='chat-messages-display',
+            children=[html.Div("Ask me anything about marine mammals!",
+                               className='chat-msg chat-msg-assistant')],
+            className='chat-messages',
+        ),
+        html.Div([
+            dcc.Input(id='chat-input', type='text',
+                      placeholder='Ask about marine mammals...',
+                      debounce=False, n_submit=0),
+            html.Button('Send', id='chat-send-btn', n_clicks=0, className='chat-send-btn'),
+        ], className='chat-input-area'),
+    ], id='chat-panel', className='chat-panel', style={'display': 'none'}),
 
 ], style={'fontFamily': 'Arial, sans-serif'})
+
+def _compute_filter_tags(species_data_list):
+    """Compute unique/shared tags based on cluster membership across active species."""
+    cluster_species = {}
+    for sd in species_data_list:
+        for rec in sd['df']:
+            cl = rec.get('Cluster Label')
+            if cl is not None and str(cl) != 'nan':
+                cluster_species.setdefault(int(cl), set()).add(sd['name'])
+    for sd in species_data_list:
+        for rec in sd['df']:
+            cl = rec.get('Cluster Label')
+            if cl is not None and str(cl) != 'nan' and int(cl) in cluster_species:
+                rec['filter_tag'] = 'unique' if len(cluster_species[int(cl)]) == 1 else 'shared'
+            else:
+                rec['filter_tag'] = 'shared'
+    return species_data_list
+
 
 # ============= CALLBACKS =============
 
@@ -926,6 +1166,7 @@ def show_animation_screen(n_clicks, selected_species):
 
 @app.callback(
     [Output('loaded-data', 'data'),
+     Output('active-species-store', 'data'),
      Output('animation-path-store', 'data'),
      Output('loading-message', 'children')],
     [Input('view-button', 'n_clicks')],
@@ -935,6 +1176,7 @@ def show_animation_screen(n_clicks, selected_species):
 def load_proteome_data(n_clicks, selected_species):
     if not selected_species:
         raise dash.exceptions.PreventUpdate
+    # Animation uses only selected species
     animation_path, is_prerendered = get_animation_path(selected_species)
     if not is_prerendered:
         loading_msg = "Rendering Custom Proteome Visualization"
@@ -946,27 +1188,10 @@ def load_proteome_data(n_clicks, selected_species):
         if not animation_path:
             print("Failed to generate animation, using placeholder")
             animation_path = None
-    print(f"Loading data for: {selected_species}")
-    placed_animals = load_data_for_species(selected_species)
-
-    # Tag proteins as "unique" or "shared" based on cluster membership
-    # across the currently selected species only
-    cluster_species = {}
-    for p in placed_animals:
-        for _, row in p['df'].iterrows():
-            cl = row.get('Cluster Label')
-            if pd.notna(cl):
-                cluster_species.setdefault(int(cl), set()).add(p['name'])
-
-    for p in placed_animals:
-        tags = []
-        for _, row in p['df'].iterrows():
-            cl = row.get('Cluster Label')
-            if pd.notna(cl) and int(cl) in cluster_species:
-                tags.append('unique' if len(cluster_species[int(cl)]) == 1 else 'shared')
-            else:
-                tags.append('shared')
-        p['df']['filter_tag'] = tags
+    # Load ALL species data so toggling is instant
+    all_species = list(SPECIES_DATA.keys())
+    print(f"Loading data for ALL species: {all_species}")
+    placed_animals = load_data_for_species(all_species)
 
     data_json = []
     for p in placed_animals:
@@ -980,7 +1205,8 @@ def load_proteome_data(n_clicks, selected_species):
             'umap_1_scaled': p['df']['UMAP 1 Scaled'].tolist(),
             'umap_2_scaled': p['df']['UMAP 2 Scaled'].tolist()
         })
-    return data_json, animation_path, loading_msg
+    # Initialize active species to the user's original selection
+    return data_json, selected_species, animation_path, loading_msg
 
 @app.callback(
     [Output('loading-indicator', 'style'),
@@ -1046,51 +1272,94 @@ app.clientside_callback(
     Input('animation-timer', 'n_intervals')
 )
 
+
+# --- Toggle species in active-species-store ---
 @app.callback(
-    Output('selected-animals-display', 'children'),
-    [Input('loaded-data', 'data')]
+    Output('active-species-store', 'data', allow_duplicate=True),
+    [Input(f'toggle-{species}', 'n_clicks') for species in SPECIES_DATA] +
+    [Input('loaded-data', 'data')],
+    [State('active-species-store', 'data'),
+     State('selected-species-store', 'data')],
+    prevent_initial_call=True
 )
-def update_selected_animals_display(loaded_data):
-    if not loaded_data:
-        return html.Div("No species selected", style={'color': '#a8dadc', 'fontSize': 14})
-    animals_html = []
-    for species_data in loaded_data:
-        species_name = species_data['name']
-        img_src = animal_icons.get(species_name, '')
-        species_color = species_data["color"]
-        species_glow = SPECIES_DATA[species_name].get("glow", "rgba(100, 255, 218, 0.3)")
-        animals_html.append(
-            html.Div([
-                html.Img(src=img_src,
-                        style={'width': '50px', 'height': '50px', 'objectFit': 'contain',
-                              'marginBottom': 6, 'filter': 'brightness(0) invert(1) opacity(0.9)'}),
-                html.P(SPECIES_DATA[species_name]['display_name'],
-                      style={'fontSize': 10, 'color': species_color, 'fontWeight': '500',
-                            'textAlign': 'center', 'margin': 0,
-                            'fontFamily': '"Inter", sans-serif'})
-            ], style={'display': 'inline-block', 'textAlign': 'center',
-                     'marginRight': 8, 'marginBottom': 8, 'verticalAlign': 'top',
-                     'padding': 10,
-                     'background': 'rgba(255, 255, 255, 0.05)',
-                     'backdropFilter': 'blur(5px)',
-                     'borderRadius': 12,
-                     'border': f'1px solid {species_color}',
-                     'boxShadow': f'0 4px 15px {species_glow}'})
-        )
-    return html.Div(animals_html)
+def update_active_species(*args):
+    species_list = list(SPECIES_DATA.keys())
+    n_species = len(species_list)
+    # args: n_clicks for each toggle (n_species), loaded_data (1), active_species state (1), selected_species state (1)
+    loaded_data = args[n_species]
+    active_species = args[n_species + 1] or []
+    selected_species = args[n_species + 2] or []
+
+    trigger = ctx.triggered_id
+    if trigger is None:
+        raise dash.exceptions.PreventUpdate
+
+    # When loaded-data fires, initialize from selected-species-store
+    if trigger == 'loaded-data':
+        return selected_species if selected_species else list(SPECIES_DATA.keys())
+
+    # A toggle button was clicked
+    if isinstance(trigger, str) and trigger.startswith('toggle-'):
+        clicked_species = trigger.replace('toggle-', '')
+        # Need loaded data to be present
+        if not loaded_data:
+            raise dash.exceptions.PreventUpdate
+        if clicked_species in active_species:
+            # Don't allow removing the last species
+            if len(active_species) <= 1:
+                raise dash.exceptions.PreventUpdate
+            return [s for s in active_species if s != clicked_species]
+        else:
+            return active_species + [clicked_species]
+
+    raise dash.exceptions.PreventUpdate
+
+
+# --- Style toggle buttons based on active species ---
+@app.callback(
+    [Output(f'toggle-{species}', 'style') for species in SPECIES_DATA],
+    [Input('active-species-store', 'data')]
+)
+def update_toggle_styles(active_species):
+    active_species = active_species or []
+    styles = []
+    for species in SPECIES_DATA:
+        species_color = SPECIES_DATA[species]['color']
+        is_active = species in active_species
+        style = {
+            'display': 'inline-flex', 'alignItems': 'center', 'gap': '4px',
+            'padding': '3px 8px',
+            'background': 'rgba(255, 255, 255, 0.05)' if is_active else 'rgba(255, 255, 255, 0.02)',
+            'borderRadius': 8,
+            'border': f'1px solid {species_color}' if is_active else '1px solid rgba(255,255,255,0.15)',
+            'cursor': 'pointer',
+            'opacity': 1.0 if is_active else 0.4,
+            'color': species_color if is_active else '#a8dadc',
+            'transition': 'all 0.2s ease',
+        }
+        styles.append(style)
+    return styles
 
 @app.callback(
     Output('interactive-graph', 'figure'),
     [Input('point-size', 'value'),
      Input('opacity', 'value'),
      Input('loaded-data', 'data'),
-     Input('protein-filter', 'value')]
+     Input('protein-filter', 'value'),
+     Input('active-species-store', 'data')]
 )
-def update_interactive_graph(point_size, opacity, loaded_data, protein_filter):
+def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, active_species):
     if not loaded_data:
         return go.Figure()
+    active_species = active_species or []
+    # Filter to only active species
+    active_data = [sd for sd in loaded_data if sd['name'] in active_species]
+    if not active_data:
+        return go.Figure()
+    # Recompute filter tags dynamically for the active subset
+    _compute_filter_tags(active_data)
     fig = go.Figure()
-    for species_data in loaded_data:
+    for species_data in active_data:
         df_records = species_data['df']
 
         # Apply protein filter
@@ -1165,14 +1434,20 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter):
 @app.callback(
     Output('filter-count-display', 'children'),
     [Input('protein-filter', 'value'),
-     Input('loaded-data', 'data')]
+     Input('loaded-data', 'data'),
+     Input('active-species-store', 'data')]
 )
-def update_filter_count(protein_filter, loaded_data):
+def update_filter_count(protein_filter, loaded_data, active_species):
     if not loaded_data:
         return ""
+    active_species = active_species or []
+    active_data = [sd for sd in loaded_data if sd['name'] in active_species]
+    if not active_data:
+        return ""
+    _compute_filter_tags(active_data)
     total = 0
     shown = 0
-    for species_data in loaded_data:
+    for species_data in active_data:
         records = species_data['df']
         total += len(records)
         if protein_filter and protein_filter != 'all':
@@ -1183,31 +1458,36 @@ def update_filter_count(protein_filter, loaded_data):
         return f"Showing {shown:,}/{total:,} proteins"
     return ""
 
-# Grey out filter radio buttons when only 1 species is loaded
+# Grey out filter radio buttons when only 1 species is active
 @app.callback(
     [Output('protein-filter-container', 'style'),
      Output('protein-filter', 'value', allow_duplicate=True)],
-    [Input('loaded-data', 'data')],
+    [Input('active-species-store', 'data')],
     [State('protein-filter', 'value')],
     prevent_initial_call=True
 )
-def toggle_filter_enabled(loaded_data, current_filter):
-    if not loaded_data or len(loaded_data) <= 1:
+def toggle_filter_enabled(active_species, current_filter):
+    if not active_species or len(active_species) <= 1:
         return {'opacity': 0.35, 'pointerEvents': 'none'}, 'all'
     return {}, current_filter
 
 @app.callback(
     Output('selection-table-container', 'children'),
     [Input('interactive-graph', 'selectedData')],
-    [State('loaded-data', 'data')]
+    [State('loaded-data', 'data'),
+     State('active-species-store', 'data')]
 )
-def show_selected_proteins(selectedData, loaded_data):
+def show_selected_proteins(selectedData, loaded_data, active_species):
     if not selectedData or not loaded_data:
         return "No proteins selected. Click or drag to select."
     try:
+        active_species = active_species or []
+        # Filter to active species (same order as graph traces)
+        active_data = [sd for sd in loaded_data if sd['name'] in active_species]
+
         # Build lookup: {species_name: {entry_id: record}} for customdata-based lookup
         species_lookup = {}
-        for species_data in loaded_data:
+        for species_data in active_data:
             entry_map = {}
             for record in species_data['df']:
                 entry_map[record['Entry']] = record
@@ -1216,10 +1496,10 @@ def show_selected_proteins(selectedData, loaded_data):
         selected_proteins = []
         for point in selectedData['points']:
             curve_num = point['curveNumber']
-            if curve_num >= len(loaded_data):
+            if curve_num >= len(active_data):
                 continue
 
-            species_data = loaded_data[curve_num]
+            species_data = active_data[curve_num]
 
             # Use customdata to find the correct protein (filter-safe)
             customdata = point.get('customdata')
@@ -1235,20 +1515,25 @@ def show_selected_proteins(selectedData, loaded_data):
             entry_id_str = str(protein.get('Entry', ''))
             ann = ANNOTATIONS.get(entry_id_str)
 
+            # Use desc from annotations for protein name
+            desc_raw = (ann.get('desc', '') if ann else '') or ''
+            # Strip OS=... suffix from UniProt desc if present
+            protein_name = desc_raw.split(' OS=')[0].strip() if desc_raw else '\u2014'
+
+            # Truncated sequence preview
+            seq_raw = (ann.get('sequence', '') if ann else '') or ''
+            seq_preview = (seq_raw[:20] + '...') if len(seq_raw) > 20 else (seq_raw or '\u2014')
+
             selected_proteins.append({
                 'Entry': protein.get('Entry', 'N/A'),
                 'Organism': SPECIES_DATA[species_data['name']]['display_name'],
-                'Protein Name': str(protein.get('Protein names', 'N/A'))[:70],
+                'Protein Name': protein_name[:80],
+                'Sequence': seq_preview,
                 'Cluster': str(protein.get('Cluster Label', 'N/A')),
-                'Length': protein.get('Length', 'N/A'),
-                'Classification': ann.get('clipDescription', '') or '\u2014' if ann else '\u2014',
                 'Domains': ann.get('hmm_labels', '') or '\u2014' if ann else '\u2014',
-                'Order': ann.get('order', '') or '\u2014' if ann else '\u2014',
-                'Family': ann.get('family', '') or '\u2014' if ann else '\u2014',
-                'Genus': ann.get('genus', '') or '\u2014' if ann else '\u2014',
-                'Confidence': ann.get('annotationConfidence', '') or '\u2014' if ann else '\u2014',
-                '% Identity': ann.get('percentIdentity', '') or '\u2014' if ann else '\u2014',
-                'Coverage': ann.get('queryCoverage', '') or '\u2014' if ann else '\u2014',
+                'HMM Descriptions': ann.get('hmm_descriptions', '') or '\u2014' if ann else '\u2014',
+                'Pfam IDs': ann.get('hmm_pfam_ids', '') or '\u2014' if ann else '\u2014',
+                'Domain Ranges': ann.get('hmm_ranges', '') or '\u2014' if ann else '\u2014',
             })
         return html.Div([
             html.Div(f"{len(selected_proteins)} protein{'s' if len(selected_proteins) != 1 else ''} selected",
@@ -1261,16 +1546,12 @@ def show_selected_proteins(selectedData, loaded_data):
                     {'name': 'Entry', 'id': 'Entry'},
                     {'name': 'Organism', 'id': 'Organism'},
                     {'name': 'Protein Name', 'id': 'Protein Name'},
+                    {'name': 'Sequence', 'id': 'Sequence'},
                     {'name': 'Cluster', 'id': 'Cluster'},
-                    {'name': 'Length', 'id': 'Length'},
-                    {'name': 'Classification', 'id': 'Classification'},
                     {'name': 'Domains', 'id': 'Domains'},
-                    {'name': 'Order', 'id': 'Order'},
-                    {'name': 'Family', 'id': 'Family'},
-                    {'name': 'Genus', 'id': 'Genus'},
-                    {'name': 'Confidence', 'id': 'Confidence'},
-                    {'name': '% Identity', 'id': '% Identity'},
-                    {'name': 'Coverage', 'id': 'Coverage'},
+                    {'name': 'HMM Descriptions', 'id': 'HMM Descriptions'},
+                    {'name': 'Pfam IDs', 'id': 'Pfam IDs'},
+                    {'name': 'Domain Ranges', 'id': 'Domain Ranges'},
                 ],
                 style_table={'overflowX': 'auto', 'borderRadius': '8px'},
                 style_cell={
@@ -1360,6 +1641,102 @@ def go_back(n_clicks):
                 {'textAlign': 'center', 'padding': '120px 20px'},
                 {'display': 'none'})
     raise dash.exceptions.PreventUpdate
+
+# ============= CHAT CALLBACKS =============
+
+@app.callback(
+    Output('chat-panel', 'style'),
+    Input('chat-toggle-btn', 'n_clicks'),
+    State('chat-panel', 'style'),
+    prevent_initial_call=True,
+)
+def toggle_chat_panel(n_clicks, current_style):
+    current_style = current_style or {}
+    if current_style.get('display') == 'none':
+        current_style['display'] = 'flex'
+    else:
+        current_style['display'] = 'none'
+    return current_style
+
+
+# Instant feedback: show user message + thinking indicator, clear input
+app.clientside_callback(
+    """
+    function(n_clicks, n_submit, inputValue, currentChildren) {
+        if (!inputValue || !inputValue.trim()) {
+            return [window.dash_clientside.no_update,
+                    window.dash_clientside.no_update,
+                    window.dash_clientside.no_update];
+        }
+        var msg = inputValue.trim();
+        var newChildren = [];
+        if (currentChildren) {
+            for (var i = 0; i < currentChildren.length; i++) {
+                newChildren.push(currentChildren[i]);
+            }
+        }
+        newChildren.push({
+            type: 'Div', namespace: 'dash_html_components',
+            props: {children: msg, className: 'chat-msg chat-msg-user'}
+        });
+        newChildren.push({
+            type: 'Div', namespace: 'dash_html_components',
+            props: {children: 'Thinking...', className: 'chat-msg chat-msg-assistant',
+                    style: {opacity: 0.5, fontStyle: 'italic'}}
+        });
+        setTimeout(function() {
+            var el = document.getElementById('chat-messages-display');
+            if (el) { el.scrollTop = el.scrollHeight; }
+        }, 50);
+        return [newChildren, '', msg];
+    }
+    """,
+    [Output('chat-messages-display', 'children', allow_duplicate=True),
+     Output('chat-input', 'value', allow_duplicate=True),
+     Output('pending-query', 'data')],
+    [Input('chat-send-btn', 'n_clicks'),
+     Input('chat-input', 'n_submit')],
+    [State('chat-input', 'value'),
+     State('chat-messages-display', 'children')],
+    prevent_initial_call=True,
+)
+
+
+# Server callback: process query when pending-query is set
+@app.callback(
+    [Output('chat-messages-display', 'children'),
+     Output('chat-history', 'data')],
+    Input('pending-query', 'data'),
+    [State('chat-history', 'data'),
+     State('active-species-store', 'data'),
+     State('interactive-graph', 'selectedData')],
+    prevent_initial_call=True,
+)
+def process_chat_query(pending_query, chat_history, active_species, selected_data):
+    if not pending_query:
+        raise dash.exceptions.PreventUpdate
+
+    chat_history = chat_history or []
+    visual_context = build_visual_context(active_species, selected_data)
+
+    mode, text = route_message(chat_history, pending_query, visual_context)
+    if mode == "rag":
+        answer = query_rag(text)
+    elif mode == "visual":
+        answer = answer_with_context(text, visual_context, chat_history)
+    else:
+        answer = text
+
+    chat_history.append({"role": "user", "content": pending_query})
+    chat_history.append({"role": "assistant", "content": answer})
+
+    message_divs = []
+    for msg in chat_history:
+        cls = 'chat-msg chat-msg-user' if msg['role'] == 'user' else 'chat-msg chat-msg-assistant'
+        message_divs.append(html.Div(msg['content'], className=cls))
+
+    return message_divs, chat_history
+
 
 server = app.server
 
