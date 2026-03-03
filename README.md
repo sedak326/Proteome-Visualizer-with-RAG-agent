@@ -59,13 +59,6 @@ The assistant was designed to handle three types of questions that users are lik
 
 ### Literature
 
-| Document | Type | Coverage |
-|---|---|---|
-| | | |
-| | | |
-| | | |
-
-*(Add your sources here)*
 
 ### Indexing
 
