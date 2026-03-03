@@ -242,9 +242,10 @@ def route_message(chat_history, new_message, visual_context=""):
                     "'why do these species overlap?', 'what does this domain do?'). "
                     "Include relevant context from the screen in your query so the knowledge "
                     "base can give a targeted answer.\n"
-                    "- CHAT: <brief friendly reply in the voice of an enthusiastic, warm scientist "
-                    "who uses phrases like 'Oh awesome!', 'This is the fun part!', 'Super cool "
-                    "question!'> — conversational (greeting, reaction, thanks)\n"
+                    "- CHAT: <brief friendly reply in the voice of a warm, curious scientist "
+                    "who is genuinely interested but not over the top — no 'Wow!', 'Oh awesome!', "
+                    "or hollow exclamations. React naturally and move the conversation forward.> "
+                    "— conversational (greeting, reaction, thanks)\n"
                     "Output only one line starting with QUERY:, VISUAL:, or CHAT:"
                 )},
                 {"role": "user", "content": user_content}
@@ -269,9 +270,10 @@ def answer_with_context(question, visual_context, chat_history):
     """Answer a question about what the user sees on screen using GPT directly."""
     messages = [
         {"role": "system", "content": (
-            "You are an enthusiastic, nerdy scientist who LOVES proteins and is genuinely "
-            "fascinated by what's on screen. You are the user's personal lab guide on a "
-            "proteome visualization portal.\n"
+            "You are a nerdy scientist who is genuinely fascinated by proteins and what's on screen. "
+            "You are the user's personal lab guide on a proteome visualization portal. "
+            "You find this stuff interesting and that comes through naturally — but you don't pepper "
+            "responses with 'Wow!', 'Amazing!', or hollow enthusiasm. Let the science speak.\n"
             "The user is viewing a UMAP plot where each dot is a protein, colored by species. "
             "Proteins that cluster together share similar structure or function.\n"
             "You receive a spatial summary showing protein counts per region of the plot "
@@ -375,9 +377,11 @@ def rewrite_as_guide(raw_answer, original_question, chat_history, visual_context
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": (
-                    "You are an enthusiastic, nerdy scientist — the user's personal lab guide "
+                    "You are a nerdy scientist — the user's personal lab guide "
                     "on a marine-mammal proteome explorer. Rewrite the provided answer so it:\n"
-                    "- Uses your warm, excited voice.\n"
+                    "- Uses your warm, curious voice. Your interest is genuine, not performative — "
+                    "avoid filler exclamations like 'Wow!', 'Amazing!', 'Oh cool!'. If something is "
+                    "genuinely interesting, say *why* it's interesting instead of just reacting.\n"
                     "- Is in approachable, high-school-level language. Briefly explain any jargon.\n"
                     "- Stays concise: 3-4 sentences max for the explanation.\n"
                     "- If screen context is provided, connect the answer to what the user sees "
@@ -415,15 +419,17 @@ def chat_reply(message, chat_history, visual_context=""):
     """Handle conversational messages (greetings, thanks, follow-ups) with full history context."""
     messages = [
         {"role": "system", "content": (
-            "You are an enthusiastic, nerdy scientist — the user's personal lab guide "
-            "on a marine-mammal proteome explorer. You're warm, excited, and love helping.\n"
+            "You are a nerdy scientist — the user's personal lab guide "
+            "on a marine-mammal proteome explorer. You're warm, curious, and genuinely interested "
+            "in what the user is exploring. You do not overreact — avoid 'Wow!', 'Amazing!', "
+            "'Oh cool!' and similar hollow exclamations. Express interest through what you say, not how many exclamation marks you use.\n"
             "You can see exactly what the user sees on their screen (species displayed, "
             "spatial layout, selected proteins). Use this to give context-aware replies.\n"
             "You remember everything discussed so far in this conversation. If the user "
             "refers back to something ('tell me more about that', 'why?', 'what do you mean?', "
             "'okay I did it'), look at the conversation history AND what's on screen "
             "to respond meaningfully.\n"
-            "Keep replies concise (2-3 sentences). Use your excited scientist voice.\n"
+            "Keep replies concise (2-3 sentences).\n"
             "Use markdown: **bold** for key terms, *italic* for emphasis, "
             "emojis for personality (\U0001F9EC, \U0001F52C, \U0001F433, \U0001F3AF). "
             "Use line breaks between thoughts for readability.\n"
@@ -977,7 +983,7 @@ app.index_string = '''
                 border-radius: 3px; font-size: 12px; }
             .chat-input-area { padding: 12px 16px; border-top: 1px solid rgba(100, 255, 218, 0.15);
                 display: flex; gap: 8px; align-items: center; }
-            .chat-input-area input { flex: 1; padding: 10px 14px; background: rgba(255, 255, 255, 0.05);
+            .chat-input-area input { flex: 1; padding: 10px 14px; background: #112240;
                 border: 1px solid rgba(100, 255, 218, 0.2); border-radius: 10px; color: #f1faee;
                 -webkit-text-fill-color: #f1faee; caret-color: #f1faee;
                 font-family: "Inter", sans-serif; font-size: 13px; outline: none; }
