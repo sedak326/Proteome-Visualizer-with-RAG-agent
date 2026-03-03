@@ -14,18 +14,90 @@ from pathlib import Path
 import base64
 import subprocess
 import sys
-import requests
 from openai import OpenAI as OpenAIClient
+from langchain_chroma import Chroma
+from langchain_openai import OpenAIEmbeddings
 
 # Resolve all paths relative to this script, not the working directory
 BASE_DIR = Path(__file__).resolve().parent
 
 # RAG Chat Configuration
-RAG_API_URL = "http://localhost:8000/v1/run"
-_openai_client = OpenAIClient()
+CHROMA_PERSIST_DIR = str(BASE_DIR / "Marine_RAG" / "chroma_db")
+CHROMA_COLLECTION  = "marine_rag_v1"
+RAG_TOP_K          = 8
+_openai_client     = OpenAIClient()
+_vectorstore       = None
 
 
-def build_visual_context(active_species, selected_data):
+def _load_vectorstore() -> Chroma:
+    """Load (or return cached) Chroma vector store."""
+    global _vectorstore
+    if _vectorstore is not None:
+        return _vectorstore
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    _vectorstore = Chroma(
+        persist_directory=CHROMA_PERSIST_DIR,
+        embedding_function=embeddings,
+        collection_name=CHROMA_COLLECTION,
+    )
+    count = _vectorstore._collection.count()
+    print(f"Chroma vectorstore loaded — {count} chunks indexed")
+    return _vectorstore
+
+
+def _region_label(x, y):
+    """Map UMAP coordinates to a human-readable region name."""
+    row = "top" if y > 100 else ("bottom" if y < -100 else "middle")
+    col = "left" if x < -100 else ("right" if x > 100 else "center")
+    if row == "middle" and col == "center":
+        return "center"
+    if row == "middle":
+        return col
+    if col == "center":
+        return row
+    return f"{row}-{col}"
+
+
+def build_spatial_summary(active_species, loaded_data):
+    """Create a compact spatial description of where each species' proteins sit on the UMAP plot."""
+    if not loaded_data or not active_species:
+        return ""
+    active_data = [sd for sd in loaded_data if sd['name'] in active_species]
+    if not active_data:
+        return ""
+
+    # Count proteins per (species, region)
+    region_species = {}   # region -> {species: count}
+    species_totals = {}
+    for sd in active_data:
+        name = sd['name']
+        xs = sd.get('umap_1_scaled', [])
+        ys = sd.get('umap_2_scaled', [])
+        species_totals[name] = len(xs)
+        for x, y in zip(xs, ys):
+            reg = _region_label(x, y)
+            region_species.setdefault(reg, {})
+            region_species[reg][name] = region_species[reg].get(name, 0) + 1
+
+    lines = ["Spatial layout of the UMAP plot (each region ~1/9 of the area):"]
+    for reg in ["top-left", "top", "top-right", "left", "center", "right",
+                "bottom-left", "bottom", "bottom-right"]:
+        counts = region_species.get(reg, {})
+        if not counts:
+            continue
+        parts_r = []
+        for sp, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+            pct = round(100 * cnt / species_totals[sp]) if species_totals.get(sp) else 0
+            parts_r.append(f"{sp} {cnt} ({pct}%)")
+        overlap_note = ""
+        if len(counts) > 1:
+            overlap_note = " [OVERLAP]"
+        lines.append(f"  {reg}: {', '.join(parts_r)}{overlap_note}")
+
+    return "\n".join(lines)
+
+
+def build_visual_context(active_species, selected_data, loaded_data=None):
     """Build a text summary of what's currently on screen."""
     parts = []
     active_species = active_species or []
@@ -34,55 +106,103 @@ def build_visual_context(active_species, selected_data):
         names = [SPECIES_DATA[s]['display_name'] for s in active_species if s in SPECIES_DATA]
         parts.append(f"Species displayed: {', '.join(names)}")
 
+    spatial = build_spatial_summary(active_species, loaded_data)
+    if spatial:
+        parts.append(spatial)
+
     if selected_data and selected_data.get('points'):
-        active_ordered = [s for s in SPECIES_DATA.keys() if s in active_species]
+        # Must match trace order in update_interactive_graph: loaded_data order filtered to active
+        if loaded_data:
+            active_ordered = [sd['name'] for sd in loaded_data if sd['name'] in active_species]
+        else:
+            active_ordered = [s for s in SPECIES_DATA.keys() if s in active_species]
 
-        # Build cluster→species map to determine unique vs shared
-        cluster_species = {}
+        # Single pass — collect everything needed for aggregation and sampling
+        cluster_species = {}   # cluster_label -> set of species keys
+        species_counts  = {}   # species key -> int
+        domain_counts   = {}   # domain label -> int (across all proteins)
+        cluster_counts  = {}   # cluster_label -> int
+        sample_points   = []   # list of formatted lines for the representative sample
+
         for point in selected_data['points']:
-            hover = point.get('text', '')
-            cl = ''
-            if 'Cluster:' in hover:
-                cl = hover.split('Cluster:')[-1].strip().split('<')[0].strip()
-            if cl:
-                curve_num = point.get('curveNumber', 0)
-                if curve_num < len(active_ordered):
-                    cluster_species.setdefault(cl, set()).add(active_ordered[curve_num])
-
-        proteins = []
-        for point in selected_data['points'][:15]:
             curve_num = point.get('curveNumber', 0)
             if curve_num >= len(active_ordered):
                 continue
             species = active_ordered[curve_num]
+            species_counts[species] = species_counts.get(species, 0) + 1
+
+            hover = point.get('text', '')
+            cluster_label = ''
+            if 'Cluster:' in hover:
+                cluster_label = hover.split('Cluster:')[-1].strip().split('<')[0].strip()
+            if cluster_label:
+                cluster_species.setdefault(cluster_label, set()).add(species)
+                cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
+
             customdata = point.get('customdata', [])
             if not customdata:
                 continue
             entry_id = str(customdata[0])
             ann = ANNOTATIONS.get(entry_id, {})
-            desc = ann.get('desc', '').split(' OS=')[0].strip() or 'Unknown'
-            domains = ann.get('hmm_labels', '') or 'None'
-            hmm_desc = ann.get('hmm_descriptions', '') or ''
-            x = round(point.get('x', 0), 1)
-            y = round(point.get('y', 0), 1)
-            # Get cluster label and unique/shared tag from the point's text hover data
-            cluster = point.get('text', '')
-            cluster_label = ''
-            if 'Cluster:' in cluster:
-                cluster_label = cluster.split('Cluster:')[-1].strip().split('<')[0].strip()
-            # Look up filter tag from loaded data via the point
-            filter_tag = point.get('filter_tag', '')
-            line = f"- {entry_id} ({SPECIES_DATA[species]['display_name']}): {desc[:80]}, UMAP=({x},{y})"
-            if cluster_label:
-                sharing = "unique" if len(cluster_species.get(cluster_label, set())) == 1 else "shared"
-                line += f", Cluster: {cluster_label} ({sharing})"
-            line += f", Domains: {domains[:60]}"
-            if hmm_desc:
-                line += f", Function: {hmm_desc[:80]}"
-            proteins.append(line)
-        if proteins:
-            total = len(selected_data['points'])
-            parts.append(f"Selected proteins ({total}):\n" + "\n".join(proteins))
+
+            # Aggregate domain frequencies across the full selection
+            for dom in (ann.get('hmm_labels', '') or '').split(';'):
+                dom = dom.strip()
+                if dom:
+                    domain_counts[dom] = domain_counts.get(dom, 0) + 1
+
+            # Collect up to 5 sample proteins total (first encountered)
+            if len(sample_points) < 5:
+                desc     = ann.get('desc', '').split(' OS=')[0].strip() or 'Unknown'
+                hmm_desc = ann.get('hmm_descriptions', '') or ''
+                domains  = ann.get('hmm_labels', '') or 'None'
+                x = round(point.get('x', 0), 1)
+                y = round(point.get('y', 0), 1)
+                sharing = (
+                    "unique" if len(cluster_species.get(cluster_label, set())) == 1 else "shared"
+                ) if cluster_label else ""
+                line = (
+                    f"  - {entry_id} ({SPECIES_DATA[species]['display_name']}): "
+                    f"{desc[:80]}, UMAP=({x},{y})"
+                )
+                if cluster_label:
+                    line += f", Cluster: {cluster_label} ({sharing})"
+                line += f", Domains: {(domains[:60])}"
+                if hmm_desc:
+                    line += f", Function: {hmm_desc[:80]}"
+                sample_points.append(line)
+
+        total = len(selected_data['points'])
+        breakdown = ", ".join(
+            f"{SPECIES_DATA[sp]['display_name']}: {cnt}"
+            for sp, cnt in species_counts.items()
+        )
+
+        section = [f"Selected proteins ({total} total — {breakdown}):"]
+
+        # Domain frequency summary (top 10)
+        if domain_counts:
+            top_domains = sorted(domain_counts.items(), key=lambda x: -x[1])[:10]
+            section.append("  Top domains across selection:")
+            for dom, cnt in top_domains:
+                section.append(f"    {dom}: {cnt} proteins")
+
+        # Cluster breakdown (top 10 by size, labelled unique/shared)
+        if cluster_counts:
+            top_clusters = sorted(cluster_counts.items(), key=lambda x: -x[1])[:10]
+            section.append("  Cluster breakdown:")
+            for cl, cnt in top_clusters:
+                sp_set = cluster_species.get(cl, set())
+                sharing = "unique to " + SPECIES_DATA[next(iter(sp_set))]['display_name'] \
+                    if len(sp_set) == 1 else "shared"
+                section.append(f"    Cluster {cl} ({sharing}): {cnt} proteins")
+
+        # Representative sample
+        if sample_points:
+            section.append(f"  Representative sample ({len(sample_points)} of {total}):")
+            section.extend(sample_points)
+
+        parts.append("\n".join(section))
 
     return "\n".join(parts) if parts else ""
 
@@ -97,7 +217,7 @@ def route_message(chat_history, new_message, visual_context=""):
     """
     context = "\n".join(
         f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-        for m in (chat_history or [])[-6:]
+        for m in (chat_history or [])[-14:]
     )
     user_content = f"Conversation:\n{context}\n\n"
     if visual_context:
@@ -108,15 +228,23 @@ def route_message(chat_history, new_message, visual_context=""):
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": (
-                    "You are a router for a marine biology knowledge assistant on a proteome "
+                    "You are a router for an enthusiastic nerdy-scientist lab guide on a proteome "
                     "visualization portal. Given a conversation, what the user sees on screen, "
                     "and their latest message, decide:\n"
-                    "- QUERY: <standalone question> — needs knowledge database lookup (general "
-                    "biology questions, facts not visible on screen)\n"
-                    "- VISUAL: <the question> — asks about what's currently displayed: selected "
-                    "proteins, clusters, species comparisons on screen, patterns in the plot, "
-                    "'explain what I see', 'what do these have in common', etc.\n"
-                    "- CHAT: <brief friendly reply> — conversational (greeting, reaction, thanks)\n"
+                    "- VISUAL: <the question> — use when the user wants you to DESCRIBE what's "
+                    "on screen: 'what do I see?', 'explain this cluster', 'what do these proteins "
+                    "have in common?', 'what's in the top-left?'. Pure observation questions.\n"
+                    "- QUERY: <standalone question that includes relevant screen context> — use "
+                    "when the user asks WHY something is the case, wants a deeper explanation, "
+                    "or asks a biology/science question. This includes both general questions "
+                    "('what is a proteome?') AND questions about on-screen data that need "
+                    "knowledge to answer ('why does gray whale have no unique proteins?', "
+                    "'why do these species overlap?', 'what does this domain do?'). "
+                    "Include relevant context from the screen in your query so the knowledge "
+                    "base can give a targeted answer.\n"
+                    "- CHAT: <brief friendly reply in the voice of an enthusiastic, warm scientist "
+                    "who uses phrases like 'Oh awesome!', 'This is the fun part!', 'Super cool "
+                    "question!'> — conversational (greeting, reaction, thanks)\n"
                     "Output only one line starting with QUERY:, VISUAL:, or CHAT:"
                 )},
                 {"role": "user", "content": user_content}
@@ -141,14 +269,45 @@ def answer_with_context(question, visual_context, chat_history):
     """Answer a question about what the user sees on screen using GPT directly."""
     messages = [
         {"role": "system", "content": (
-            "You are a marine biology assistant on a proteome visualization portal. "
+            "You are an enthusiastic, nerdy scientist who LOVES proteins and is genuinely "
+            "fascinated by what's on screen. You are the user's personal lab guide on a "
+            "proteome visualization portal.\n"
             "The user is viewing a UMAP plot where each dot is a protein, colored by species. "
-            "Proteins that cluster together share structural or functional similarity. "
-            "Answer the user's question about what they see. Be concise (2-3 sentences). "
-            "Explain biological significance in plain language. Don't list raw IDs."
+            "Proteins that cluster together share similar structure or function.\n"
+            "You receive a spatial summary showing protein counts per region of the plot "
+            "(top-left, center, bottom-right, etc.) and which regions have species overlap. "
+            "Use this to reference what the user actually sees — e.g. 'See that dense cluster "
+            "in the top-left? That's mostly sea lion proteins!' Only mention regions where "
+            "something interesting is happening. NEVER guess locations — only reference "
+            "regions described in the spatial data.\n"
+            "\n"
+            "CRITICAL — stay grounded in the data:\n"
+            "- ONLY state things that are directly supported by the data provided to you "
+            "(spatial summary, selected proteins, cluster labels, domain annotations).\n"
+            "- If the data shows something (e.g. no unique clusters for a species), describe "
+            "WHAT you see, but do NOT fabricate explanations for WHY. Instead, say what the "
+            "data shows and suggest how to investigate further (e.g. 'The data shows all Gray "
+            "Whale clusters are shared with Orca — try selecting one of those shared clusters "
+            "to see which proteins they have in common!').\n"
+            "- NEVER make up evolutionary explanations, biological mechanisms, or causal "
+            "reasoning that isn't in the data. If you don't know why, say so honestly.\n"
+            "- It's OK to say 'That's interesting — I'm not sure why, but here's what we "
+            "could try to find out...'\n"
+            "\n"
+            "Style rules:\n"
+            "- Use approachable, high-school-level language. If you mention jargon, explain it briefly.\n"
+            "- Be concise: 3-4 sentences max.\n"
+            "- Show genuine excitement about interesting patterns.\n"
+            "- Use markdown formatting: **bold** for key terms, *italic* for emphasis, "
+            "and emojis to add personality (e.g. \U0001F9EC, \U0001F52C, \U0001F433, \U0001F3AF). "
+            "Use line breaks between thoughts for readability.\n"
+            "- After answering, suggest ONE concrete next step: either a UI action "
+            "(e.g., \"Try lassoing that cluster!\", \"Toggle another species to compare!\") "
+            "OR a related topic you can explain.\n"
+            "- Don't list raw protein IDs."
         )}
     ]
-    for msg in (chat_history or [])[-4:]:
+    for msg in (chat_history or [])[-14:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": f"On my screen:\n{visual_context}\n\nQuestion: {question}"})
     try:
@@ -164,23 +323,135 @@ def answer_with_context(question, visual_context, chat_history):
 
 
 def query_rag(query_text):
-    """Query the AutoRAG API and return the answer."""
+    """Retrieve relevant chunks from Chroma and generate an answer via GPT-4o-mini."""
     try:
-        r = requests.post(RAG_API_URL, json={"query": query_text}, timeout=60)
-        r.raise_for_status()
-        data = r.json()
-        if isinstance(data, str):
-            return data
-        if isinstance(data, dict):
-            result = data.get("result", "")
-            if isinstance(result, list):
-                return result[0] if result else "No answer generated."
-            return str(result)
-        return str(data)
-    except requests.exceptions.ConnectionError:
-        return "The knowledge base service is not running. Start it with: autorag run_api --trial_dir /home/skavlak/AI_Agent/evals/eval_run_1/0"
+        vs = _load_vectorstore()
+        retrieved = vs.similarity_search(query_text, k=RAG_TOP_K)
+
+        if not retrieved:
+            context = ""
+        else:
+            context = "\n\n---\n\n".join(d.page_content for d in retrieved)
+
+        resp = _openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": (
+                    "You are a marine biology knowledge assistant. "
+                    "You have access to a curated corpus of marine mammal research papers "
+                    "and species accounts (context chunks below). "
+                    "Prioritise answering from the context — each chunk starts with its source "
+                    "location (Document, Chapter, Section, Page), so cite naturally "
+                    "(e.g. 'According to Smith 2023, page 4...'). "
+                    "If the context chunks are not relevant to the question, answer from your "
+                    "general marine biology knowledge but clearly note: "
+                    "'This is from general knowledge, not the specific literature.' "
+                    "Never fabricate citations or paper titles."
+                )},
+                {"role": "user", "content": (
+                    f"Context:\n{context}\n\nQuestion: {query_text}\n\nAnswer:"
+                    if context else
+                    f"Question: {query_text}\n\nAnswer:"
+                )},
+            ],
+            temperature=0,
+            max_tokens=400,
+        )
+        return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"Error: {str(e)}"
+
+
+def rewrite_as_guide(raw_answer, original_question, chat_history, visual_context=""):
+    """Rewrite a raw RAG answer in the enthusiastic scientist guide voice and suggest follow-up topics."""
+    if raw_answer.startswith("Error:") or raw_answer.startswith("The knowledge base service"):
+        return raw_answer
+    try:
+        history_ctx = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+            for m in (chat_history or [])[-14:]
+        )
+        resp = _openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": (
+                    "You are an enthusiastic, nerdy scientist — the user's personal lab guide "
+                    "on a marine-mammal proteome explorer. Rewrite the provided answer so it:\n"
+                    "- Uses your warm, excited voice.\n"
+                    "- Is in approachable, high-school-level language. Briefly explain any jargon.\n"
+                    "- Stays concise: 3-4 sentences max for the explanation.\n"
+                    "- If screen context is provided, connect the answer to what the user sees "
+                    "(e.g. 'Looking at your plot, you can see...'). But only reference things "
+                    "that are actually in the screen data.\n"
+                    "- Uses markdown: **bold** for key terms, *italic* for emphasis, "
+                    "emojis for personality (\U0001F9EC, \U0001F52C, \U0001F433, \U0001F3AF). "
+                    "Use line breaks between thoughts.\n"
+                    "- Ends with 1-2 follow-up topic suggestions phrased as friendly questions, "
+                    "e.g. \"Want me to explain how protein folding works?\" or "
+                    "\"Curious about how dolphins and whales compare at the protein level?\". "
+                    "Pick topics that naturally flow from what was just discussed.\n"
+                    "- Do NOT invent facts, evolutionary explanations, or causal reasoning "
+                    "beyond what the source answer says. Only rephrase and simplify the source. "
+                    "If the source doesn't explain why, don't make up a reason — just describe "
+                    "what it says and suggest related topics to explore."
+                )},
+                {"role": "user", "content": (
+                    f"Recent conversation:\n{history_ctx}\n\n"
+                    + (f"What's on screen:\n{visual_context}\n\n" if visual_context else "")
+                    + f"User asked: {original_question}\n\n"
+                    f"Raw source answer:\n{raw_answer}\n\n"
+                    "Rewrite this in your guide voice with follow-up topic suggestions."
+                )}
+            ],
+            temperature=0.5,
+            max_tokens=300,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        return raw_answer
+
+
+def chat_reply(message, chat_history, visual_context=""):
+    """Handle conversational messages (greetings, thanks, follow-ups) with full history context."""
+    messages = [
+        {"role": "system", "content": (
+            "You are an enthusiastic, nerdy scientist — the user's personal lab guide "
+            "on a marine-mammal proteome explorer. You're warm, excited, and love helping.\n"
+            "You can see exactly what the user sees on their screen (species displayed, "
+            "spatial layout, selected proteins). Use this to give context-aware replies.\n"
+            "You remember everything discussed so far in this conversation. If the user "
+            "refers back to something ('tell me more about that', 'why?', 'what do you mean?', "
+            "'okay I did it'), look at the conversation history AND what's on screen "
+            "to respond meaningfully.\n"
+            "Keep replies concise (2-3 sentences). Use your excited scientist voice.\n"
+            "Use markdown: **bold** for key terms, *italic* for emphasis, "
+            "emojis for personality (\U0001F9EC, \U0001F52C, \U0001F433, \U0001F3AF). "
+            "Use line breaks between thoughts for readability.\n"
+            "IMPORTANT: Only state things supported by the data on screen or the conversation "
+            "history. NEVER fabricate evolutionary explanations or biological mechanisms. "
+            "If you don't know why something is the way it is, say so honestly and suggest "
+            "how to investigate further.\n"
+            "If the conversation allows, gently suggest something to explore next — "
+            "a topic or a tool in the UI."
+        )}
+    ]
+    for msg in (chat_history or [])[-14:]:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    user_content = message
+    if visual_context:
+        user_content = f"[What's on my screen right now:\n{visual_context}]\n\n{message}"
+    messages.append({"role": "user", "content": user_content})
+    try:
+        resp = _openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.5,
+            max_tokens=200,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        return message
+
 
 # Ocean-inspired color palette
 OCEAN_COLORS = {
@@ -657,10 +928,16 @@ app.index_string = '''
             .rc-slider-track { background: linear-gradient(90deg, #64ffda, #a8dadc) !important; }
             .rc-slider-handle { border-color: #64ffda !important; background-color: #64ffda !important; box-shadow: 0 0 10px rgba(100, 255, 218, 0.5) !important; }
             .rc-slider-rail { background-color: rgba(100, 255, 218, 0.2) !important; }
-            .modebar {
+            .modebar, .js-plotly-plot .plotly .modebar {
                 background: rgba(10, 25, 47, 0.85) !important;
                 border-radius: 8px !important;
                 padding: 4px 8px !important;
+                left: 0 !important;
+                right: auto !important;
+            }
+            .modebar-container {
+                right: auto !important;
+                left: 0 !important;
             }
             .modebar-btn { color: #a8dadc !important; }
             .modebar-btn:hover { color: #64ffda !important; }
@@ -689,10 +966,20 @@ app.index_string = '''
                 color: #f1faee; border: 1px solid rgba(100, 255, 218, 0.2); border-bottom-right-radius: 4px; }
             .chat-msg-assistant { align-self: flex-start; background: rgba(255, 255, 255, 0.05);
                 color: #a8dadc; border: 1px solid rgba(255, 255, 255, 0.1); border-bottom-left-radius: 4px; }
+            .chat-md { margin: 0; }
+            .chat-md p { margin: 0 0 8px 0; }
+            .chat-md p:last-child { margin-bottom: 0; }
+            .chat-md strong { color: #64ffda; font-weight: 600; }
+            .chat-md em { color: #f1faee; font-style: italic; }
+            .chat-md ul, .chat-md ol { margin: 4px 0; padding-left: 18px; }
+            .chat-md li { margin-bottom: 2px; }
+            .chat-md code { background: rgba(100, 255, 218, 0.1); padding: 1px 4px;
+                border-radius: 3px; font-size: 12px; }
             .chat-input-area { padding: 12px 16px; border-top: 1px solid rgba(100, 255, 218, 0.15);
                 display: flex; gap: 8px; align-items: center; }
             .chat-input-area input { flex: 1; padding: 10px 14px; background: rgba(255, 255, 255, 0.05);
                 border: 1px solid rgba(100, 255, 218, 0.2); border-radius: 10px; color: #f1faee;
+                -webkit-text-fill-color: #f1faee; caret-color: #f1faee;
                 font-family: "Inter", sans-serif; font-size: 13px; outline: none; }
             .chat-input-area input:focus { border-color: #64ffda; box-shadow: 0 0 10px rgba(100, 255, 218, 0.2); }
             .chat-input-area input::placeholder { color: #457b9d; }
@@ -700,6 +987,32 @@ app.index_string = '''
                 border-radius: 10px; color: #64ffda; cursor: pointer; font-family: "JetBrains Mono", monospace;
                 font-size: 12px; font-weight: 500; transition: all 0.2s ease; }
             .chat-send-btn:hover { background: rgba(100, 255, 218, 0.3); }
+            /* Plot loading overlay */
+            .plot-loading-overlay {
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                background: linear-gradient(180deg, #0a192f 0%, #112240 50%, #1d3557 100%);
+                display: none; align-items: center; justify-content: center; flex-direction: column;
+                z-index: 500; opacity: 0; transition: opacity 0.6s ease-out;
+            }
+            .plot-loading-overlay .loading-sub {
+                color: #a8dadc; font-size: 13px; font-family: "JetBrains Mono", monospace;
+                letter-spacing: 1px; margin-top: 10px;
+            }
+            /* AI hint toast */
+            .ai-hint-toast {
+                position: fixed; bottom: 96px; right: 30px;
+                background: rgba(10, 25, 47, 0.95); backdrop-filter: blur(20px);
+                border: 1px solid rgba(100, 255, 218, 0.3); border-radius: 12px;
+                padding: 14px 20px; color: #a8dadc; font-family: "Inter", sans-serif; font-size: 13px;
+                box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4), 0 0 20px rgba(100, 255, 218, 0.1);
+                z-index: 998; display: none; opacity: 0; transform: translateY(10px);
+                transition: opacity 0.5s ease, transform 0.5s ease;
+                max-width: 280px; cursor: pointer; line-height: 1.5;
+            }
+            .ai-hint-toast:hover {
+                border-color: #64ffda;
+                box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4), 0 0 30px rgba(100, 255, 218, 0.2);
+            }
         </style>
     </head>
     <body>
@@ -1013,18 +1326,31 @@ app.layout = html.Div([
     ], id='explorer-screen', style={'display': 'none', 'fontFamily': '"Inter", sans-serif',
                                     'padding': '15px 20px', 'backgroundColor': 'transparent', 'opacity': 0}),
 
-    dcc.Interval(id='animation-timer', interval=3400, disabled=True, n_intervals=0, max_intervals=1),
+    dcc.Interval(id='gif-load-poller', interval=200, disabled=True, n_intervals=0),
+    dcc.Interval(id='animation-timer', interval=200, disabled=True, n_intervals=0),
     dcc.Interval(id='fade-complete-timer', interval=800, disabled=True, n_intervals=0, max_intervals=1),
     dcc.Store(id='animation-path-store', data=None),
 
     # Chat widget - floating toggle + panel
     html.Button('AI', id='chat-toggle-btn', n_clicks=0, className='chat-toggle'),
     html.Div([
-        html.Div("Marine Biology Assistant", className='chat-header'),
+        html.Div("Your Lab Guide", className='chat-header'),
         html.Div(
             id='chat-messages-display',
-            children=[html.Div("Ask me anything about marine mammals!",
-                               className='chat-msg chat-msg-assistant')],
+            children=[
+                html.Div(dcc.Markdown(
+                    "Hey there! \U0001F30A Welcome to the **Proteome Explorer**! "
+                    "Each dot on this plot is a *protein* — and when dots **cluster together**, "
+                    "it means those proteins share similar structure or function. Pretty neat, right?",
+                    className='chat-md'),
+                    className='chat-msg chat-msg-assistant'),
+                html.Div(dcc.Markdown(
+                    "Here's a fun thing to try: grab the **lasso tool** \U0001F3AF from the "
+                    "toolbar (top-left of the plot) and draw around a cluster. "
+                    "You'll see the protein details pop up in the table below!",
+                    className='chat-md'),
+                    className='chat-msg chat-msg-assistant'),
+            ],
             className='chat-messages',
         ),
         html.Div([
@@ -1034,6 +1360,28 @@ app.layout = html.Div([
             html.Button('Send', id='chat-send-btn', n_clicks=0, className='chat-send-btn'),
         ], className='chat-input-area'),
     ], id='chat-panel', className='chat-panel', style={'display': 'none'}),
+
+    # Plot loading overlay (between animation and interactive explorer)
+    html.Div([
+        html.Div(className='marine-loader'),
+        html.H3("Rendering Proteome Map",
+                 className='shimmer-text',
+                 style={'fontFamily': '"Inter", sans-serif', 'fontWeight': '300',
+                        'fontSize': 24, 'marginBottom': 0}),
+        html.P("Almost there...", className='loading-sub'),
+    ], id='plot-loading-overlay', className='plot-loading-overlay'),
+
+    # AI hint toast (appears once plot is ready)
+    html.Div([
+        html.Span("AI",
+                   style={'background': 'linear-gradient(135deg, #64ffda, #457b9d)',
+                          'color': '#0a192f', 'borderRadius': '50%', 'width': '24px',
+                          'height': '24px', 'display': 'inline-flex', 'alignItems': 'center',
+                          'justifyContent': 'center', 'fontSize': '10px', 'fontWeight': '700',
+                          'marginRight': '10px', 'flexShrink': '0',
+                          'fontFamily': '"Inter", sans-serif'}),
+        html.Span("Hey! I can walk you through what's on screen — click to chat!"),
+    ], id='ai-hint-toast', className='ai-hint-toast'),
 
 ], style={'fontFamily': 'Arial, sans-serif'})
 
@@ -1212,7 +1560,8 @@ def load_proteome_data(n_clicks, selected_species):
     [Output('loading-indicator', 'style'),
      Output('animation-container', 'style'),
      Output('animation-gif', 'src'),
-     Output('animation-timer', 'disabled')],
+     Output('gif-load-poller', 'disabled'),
+     Output('explorer-screen', 'style', allow_duplicate=True)],
     [Input('loaded-data', 'data'),
      Input('animation-path-store', 'data')],
     prevent_initial_call=True
@@ -1228,48 +1577,142 @@ def display_animation(loaded_data, animation_path):
         print("Warning: No animation available")
     loading_style = {'display': 'none'}
     animation_container_style = {'display': 'block'}
-    return loading_style, animation_container_style, gif_url, False
+    # Render explorer invisibly in background so the plot builds while animation plays
+    explorer_bg_style = {'display': 'block', 'fontFamily': '"Inter", sans-serif',
+                         'padding': '15px 20px', 'backgroundColor': 'transparent', 'opacity': 0}
+    # Start polling for GIF load; animation-timer stays disabled until GIF is ready
+    return loading_style, animation_container_style, gif_url, False, explorer_bg_style
 
-@app.callback(
-    Output('animation-gif', 'src', allow_duplicate=True),
-    [Input('animation-timer', 'n_intervals')],
-    [State('animation-path-store', 'data')],
-    prevent_initial_call=True
+# Poll every 200ms until the GIF is loaded in the browser, then restart it
+# from frame 1 and enable the 5s animation timer.
+app.clientside_callback(
+    """
+    function(n) {
+        var img = document.getElementById('animation-gif');
+        if (!img || !img.src || !img.complete || img.naturalWidth === 0) {
+            /* Not loaded yet — keep polling, keep animation-timer disabled */
+            return [false, true];
+        }
+        /* GIF is loaded and playing — stop poller, start the 5s timer */
+        return [true, false];
+    }
+    """,
+    [Output('gif-load-poller', 'disabled', allow_duplicate=True),
+     Output('animation-timer', 'disabled', allow_duplicate=True)],
+    Input('gif-load-poller', 'n_intervals'),
+    prevent_initial_call=True,
 )
-def freeze_animation(n, animation_path):
-    if n >= 1 and animation_path:
-        last_frame_path = animation_path.replace('.gif', '_last_frame.png')
-        if Path(last_frame_path).exists():
-            print(f"Freezing animation with last frame: {last_frame_path}")
-            return f'/animations/{Path(last_frame_path).name}'
-    raise dash.exceptions.PreventUpdate
 
 app.clientside_callback(
     """
     function(n_intervals) {
-        if (n_intervals >= 1) {
-            const animScreen = document.getElementById('animation-screen');
-            const explorerScreen = document.getElementById('explorer-screen');
-            if (animScreen && explorerScreen) {
-                animScreen.style.transition = 'opacity 0.6s ease-out';
-                animScreen.style.opacity = '0';
-                explorerScreen.style.display = 'block';
-                explorerScreen.style.opacity = '0';
-                setTimeout(function() {
-                    explorerScreen.style.transition = 'opacity 0.8s ease-in';
-                    explorerScreen.style.opacity = '1';
-                }, 50);
-                setTimeout(function() {
-                    animScreen.style.display = 'none';
-                }, 700);
-            }
-            return window.dash_clientside.no_update;
+        if (n_intervals < 1) {
+            return [window.dash_clientside.no_update, window.dash_clientside.no_update];
         }
-        return window.dash_clientside.no_update;
+
+        /* Check if Plotly graph has real data rendered */
+        var graphEl = document.getElementById('interactive-graph');
+        var plotDiv = graphEl ? graphEl.querySelector('.js-plotly-plot') : null;
+        var ready = false;
+        if (plotDiv && plotDiv.data && plotDiv.data.length > 0) {
+            for (var i = 0; i < plotDiv.data.length; i++) {
+                if (plotDiv.data[i].x && plotDiv.data[i].x.length > 0) {
+                    ready = true;
+                    break;
+                }
+            }
+        }
+
+        if (!ready) {
+            /* Plot not ready — keep animation playing, keep polling */
+            return [window.dash_clientside.no_update, window.dash_clientside.no_update];
+        }
+
+        /* Plot is ready — stop polling and transition */
+        var animScreen = document.getElementById('animation-screen');
+        var explorerScreen = document.getElementById('explorer-screen');
+
+        if (animScreen && explorerScreen) {
+            /* Fade out animation, fade in explorer simultaneously */
+            animScreen.style.transition = 'opacity 0.8s ease-out';
+            animScreen.style.opacity = '0';
+            explorerScreen.style.transition = 'opacity 0.8s ease-in';
+            explorerScreen.style.opacity = '1';
+
+            setTimeout(function() {
+                animScreen.style.display = 'none';
+
+                /* Move modebar to top-left and keep it there on re-renders */
+                function fixModebar() {
+                    document.querySelectorAll('.modebar').forEach(function(el) {
+                        el.style.setProperty('right', 'auto', 'important');
+                        el.style.setProperty('left', '2px', 'important');
+                    });
+                    document.querySelectorAll('.modebar-container').forEach(function(el) {
+                        el.style.setProperty('right', 'auto', 'important');
+                        el.style.setProperty('left', '0', 'important');
+                    });
+                }
+                fixModebar();
+                if (graphEl && !graphEl._modebarObserver) {
+                    graphEl._modebarObserver = new MutationObserver(fixModebar);
+                    graphEl._modebarObserver.observe(graphEl, {childList: true, subtree: true});
+                }
+
+                /* Show AI hint toast */
+                setTimeout(function() {
+                    var toast = document.getElementById('ai-hint-toast');
+                    if (!toast) return;
+                    toast.style.display = 'flex';
+                    toast.style.alignItems = 'center';
+                    setTimeout(function() {
+                        toast.style.opacity = '1';
+                        toast.style.transform = 'translateY(0)';
+                    }, 50);
+                    toast.onclick = function() {
+                        toast.style.opacity = '0';
+                        toast.style.transform = 'translateY(10px)';
+                        setTimeout(function() { toast.style.display = 'none'; }, 500);
+                        var chatBtn = document.getElementById('chat-toggle-btn');
+                        if (chatBtn) chatBtn.click();
+                    };
+                    setTimeout(function() {
+                        if (toast.style.opacity !== '0') {
+                            toast.style.opacity = '0';
+                            toast.style.transform = 'translateY(10px)';
+                            setTimeout(function() { toast.style.display = 'none'; }, 500);
+                        }
+                    }, 8000);
+                }, 700);
+            }, 800);
+        }
+
+        /* Disable animation-timer — we're done polling */
+        return [window.dash_clientside.no_update, true];
     }
     """,
-    Output('fade-complete-timer', 'disabled'),
-    Input('animation-timer', 'n_intervals')
+    [Output('fade-complete-timer', 'disabled'),
+     Output('animation-timer', 'disabled', allow_duplicate=True)],
+    Input('animation-timer', 'n_intervals'),
+    prevent_initial_call=True
+)
+
+# Hide overlay and toast when navigating back to selection screen
+app.clientside_callback(
+    """
+    function(n_clicks) {
+        if (n_clicks > 0) {
+            var overlay = document.getElementById('plot-loading-overlay');
+            var toast = document.getElementById('ai-hint-toast');
+            if (overlay) { overlay.style.display = 'none'; overlay.style.opacity = '0'; }
+            if (toast) { toast.style.display = 'none'; toast.style.opacity = '0'; }
+        }
+        return '';
+    }
+    """,
+    Output('back-button', 'title'),
+    Input('back-button', 'n_clicks'),
+    prevent_initial_call=True
 )
 
 
@@ -1425,8 +1868,8 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
     )
     fig.update_traces(
         selectedpoints=[],
-        selected=dict(marker=dict(opacity=1.0, size=6)),
-        unselected=dict(marker=dict(opacity=0.3))
+        selected=dict(marker=dict(opacity=1.0, size=point_size)),
+        unselected=dict(marker=dict(opacity=opacity, size=point_size))
     )
     return fig
 
@@ -1611,7 +2054,8 @@ def show_selected_proteins(selectedData, loaded_data, active_species):
                 editable=False,
                 page_size=10,
                 page_action='native',
-                sort_action='native'
+                sort_action='native',
+                sort_by=[{'column_id': 'Protein Name', 'direction': 'asc'}]
             )
         ])
     except Exception as e:
@@ -1627,6 +2071,7 @@ def show_selected_proteins(selectedData, loaded_data, active_species):
      Output('explorer-screen', 'style', allow_duplicate=True),
      Output('animation-timer', 'n_intervals'),
      Output('animation-timer', 'disabled', allow_duplicate=True),
+     Output('gif-load-poller', 'disabled', allow_duplicate=True),
      Output('loading-indicator', 'style', allow_duplicate=True),
      Output('animation-container', 'style', allow_duplicate=True)],
     [Input('back-button', 'n_clicks')],
@@ -1637,7 +2082,7 @@ def go_back(n_clicks):
         return ({'display': 'block', 'backgroundColor': 'transparent',
                 'minHeight': '100vh', 'paddingTop': 60, 'opacity': 1},
                 {'display': 'none', 'opacity': 0},
-                0, True,
+                0, True, True,
                 {'textAlign': 'center', 'padding': '120px 20px'},
                 {'display': 'none'})
     raise dash.exceptions.PreventUpdate
@@ -1709,31 +2154,45 @@ app.clientside_callback(
     Input('pending-query', 'data'),
     [State('chat-history', 'data'),
      State('active-species-store', 'data'),
-     State('interactive-graph', 'selectedData')],
+     State('interactive-graph', 'selectedData'),
+     State('loaded-data', 'data')],
     prevent_initial_call=True,
 )
-def process_chat_query(pending_query, chat_history, active_species, selected_data):
+def process_chat_query(pending_query, chat_history, active_species, selected_data, loaded_data):
     if not pending_query:
         raise dash.exceptions.PreventUpdate
 
     chat_history = chat_history or []
-    visual_context = build_visual_context(active_species, selected_data)
+    visual_context = build_visual_context(active_species, selected_data, loaded_data)
 
     mode, text = route_message(chat_history, pending_query, visual_context)
     if mode == "rag":
-        answer = query_rag(text)
+        raw = query_rag(text)
+        if raw.startswith("Error:") or raw.startswith("The knowledge base service"):
+            # RAG unavailable — fall back to answering from visual context or chat
+            if visual_context:
+                answer = answer_with_context(text, visual_context, chat_history)
+            else:
+                answer = chat_reply(pending_query, chat_history, visual_context)
+        else:
+            answer = rewrite_as_guide(raw, pending_query, chat_history, visual_context)
     elif mode == "visual":
         answer = answer_with_context(text, visual_context, chat_history)
     else:
-        answer = text
+        answer = chat_reply(pending_query, chat_history, visual_context)
 
     chat_history.append({"role": "user", "content": pending_query})
     chat_history.append({"role": "assistant", "content": answer})
 
     message_divs = []
     for msg in chat_history:
-        cls = 'chat-msg chat-msg-user' if msg['role'] == 'user' else 'chat-msg chat-msg-assistant'
-        message_divs.append(html.Div(msg['content'], className=cls))
+        if msg['role'] == 'user':
+            message_divs.append(html.Div(msg['content'], className='chat-msg chat-msg-user'))
+        else:
+            message_divs.append(html.Div(
+                dcc.Markdown(msg['content'], className='chat-md'),
+                className='chat-msg chat-msg-assistant'
+            ))
 
     return message_divs, chat_history
 
@@ -1745,6 +2204,7 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("Marine Mammal Proteome Explorer - Ocean Edition")
     print("="*60)
+    _load_vectorstore()
     port = int(os.environ.get('PORT', 7860))
     host = '0.0.0.0'
     print(f"Open browser: http://{host}:{port}/")

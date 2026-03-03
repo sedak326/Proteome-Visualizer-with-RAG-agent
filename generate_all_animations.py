@@ -11,23 +11,20 @@ from itertools import combinations
 from pathlib import Path
 
 # All available species
-SPECIES = ['sealion', 'bottlenose', 'orca', 'harborseal', 'cobra']
+SPECIES = ['sealion', 'bottlenose', 'graywhale', 'orca', 'harborseal', 'cobra']
 
 def generate_all_animations():
-    """Generate all single and pair combinations"""
+    """Generate all non-empty subset combinations (singles through all-six)"""
 
     output_dir = Path('prerendered_animations')
     output_dir.mkdir(exist_ok=True, parents=True)
 
     all_combinations = []
 
-    # Singles (5)
-    for species in SPECIES:
-        all_combinations.append([species])
-
-    # Pairs (10)
-    for pair in combinations(SPECIES, 2):
-        all_combinations.append(list(pair))
+    # All subsets of size 1 through len(SPECIES)
+    for size in range(1, len(SPECIES) + 1):
+        for combo in combinations(SPECIES, size):
+            all_combinations.append(list(combo))
 
     print(f"Generating {len(all_combinations)} animations...")
     print("=" * 60)
@@ -77,10 +74,9 @@ def generate_all_animations():
 if __name__ == '__main__':
     print("Proteome Explorer - Animation Pre-rendering")
     print("=" * 60)
-    print("This will generate 10 animations (4 species):")
-    print("  - 4 single species")
-    print("  - 6 species pairs")
-    print("\nEstimated time: ~8-15 minutes")
+    print(f"This will generate 63 animations (all subsets of {len(SPECIES)} species):")
+    print("  - 6 singles, 15 pairs, 20 triples, 15 quads, 6 quints, 1 all-six")
+    print("\nEstimated time: ~2 hours")
     print("=" * 60)
     print("\nStarting generation...")
 

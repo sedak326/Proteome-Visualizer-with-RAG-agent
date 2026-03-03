@@ -1,11 +1,16 @@
 __pycache__/
 *.pyc
+.claude/
 
-# Large binary data files
-h5py_files/*.h5
-fastafiles/*.fasta
-fastafiles/*.fasta.gz
-fastafiles/*.faa
-fastafiles/__pycache__/
-fastafiles/no_isoforms/
-fastafiles/split/
+# SSH keys — never commit these
+hj
+hj.pub
+
+# Large binary data files — not needed to run the app
+h5py_files/
+fastafiles/
+
+# Copyrighted literature — source yourself and run Marine_RAG/build_index.py
+Marine_RAG/data/
+Marine_RAG/project/
+Marine_RAG/__pycache__/

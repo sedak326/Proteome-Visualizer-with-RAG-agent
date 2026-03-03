@@ -24,14 +24,14 @@ SPECIES_MAP = {
     'cobra': ("animal_pics/cobra.png", "umap_output/King Cobra_umap.csv"),
 }
 
-# Color mapping for each species
+# Color mapping for each species — must match SPECIES_DATA colors in proteome_explorer_ux2.py
 SPECIES_COLORS = {
-    'sealion': np.array([1.0, 0.0, 0.0]),      # red
-    'bottlenose': np.array([0.0, 0.0, 1.0]),   # blue
-    'graywhale': np.array([0.0, 0.8, 0.0]),    # green
-    'orca': np.array([0.5, 0.0, 1.0]),         # purple
-    'harborseal': np.array([1.0, 0.5, 0.0]),    # orange
-    'cobra': np.array([0.0, 0.8, 0.8])          # cyan
+    'sealion':    np.array([0.902, 0.098, 0.294]),  # #E6194B
+    'bottlenose': np.array([0.263, 0.388, 0.847]),  # #4363D8
+    'graywhale':  np.array([0.235, 0.706, 0.294]),  # #3CB44B
+    'orca':       np.array([0.941, 0.196, 0.902]),  # #F032E6
+    'harborseal': np.array([0.604, 0.388, 0.141]),  # #9A6324
+    'cobra':      np.array([0.749, 0.667, 0.0]),    # #BFAA00
 }
 
 # Plot boundaries - increased to fit all animals
