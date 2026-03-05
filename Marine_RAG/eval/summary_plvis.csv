@@ -1,0 +1,2 @@
+n_questions,rag_sem_score_mean,base_sem_score_mean,rag_win_rate,rag_grounded_rate,rag_delta_mean,rag_bert_score_mean,base_bert_score_mean,rag_bert_win_rate,rag_bert_delta_mean
+200,0.8169576868376492,0.7153930694426223,0.83,0.98,0.101564617395027,0.92869425,0.8959375,0.785,0.032756664
