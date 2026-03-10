@@ -1,0 +1,2 @@
+rag_sem_score_mean,base_sem_score_mean,rag_sem_win_rate,rag_bert_score_mean,base_bert_score_mean,rag_bert_win_rate,recall_at_1_mean,recall_at_8_mean,mrr_mean,faithfulness_mean,rag_latency_mean_s,base_latency_mean_s
+0.8181831475156742,0.7144161700636826,0.815,0.9260173,0.8948246,0.73,0.42,0.855,0.6,0.8661308968808968,3.43405100107193,2.189114247560501

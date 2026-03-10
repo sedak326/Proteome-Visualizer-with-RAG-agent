@@ -197,12 +197,14 @@ def run_evaluation() -> None:
     records = []
     for i, row in qa_df.iterrows():
         question = row["query"]
-        gen_gt   = list(row["generation_gt"])  # list of acceptable answers
+        gen_gt   = list(row["generation_gt"])  # generation_gt consists of a long-form + concise version of the answer
 
         print(f"[{i+1}/{len(qa_df)}] {question[:80]}", end=" … ", flush=True)
 
+        #retrieval_gt is the ID of the correct chunk
         retrieval_gt = list(row["retrieval_gt"][0]) if hasattr(row["retrieval_gt"][0], "__iter__") else list(row["retrieval_gt"])
-
+        
+        #calculates how long it takes for RAG agent and base model to generate answer
         t0 = time.time()
         rag_ans, retrieved_ids, retrieved_docs = rag_retrieve(question)
         rag_latency = time.time() - t0
@@ -216,7 +218,6 @@ def run_evaluation() -> None:
         grounded = is_grounded(rag_ans)
 
         r_at_1 = recall_at_k(retrieved_ids, retrieval_gt, k=1)
-        r_at_3 = recall_at_k(retrieved_ids, retrieval_gt, k=3)
         r_at_8 = recall_at_k(retrieved_ids, retrieval_gt, k=RAG_TOP_K)
         mrr_score = mrr(retrieved_ids, retrieval_gt)
 
@@ -235,7 +236,6 @@ def run_evaluation() -> None:
             "rag_grounded":   grounded,
             "rag_wins":       int(rag_sem > base_sem),
             "recall_at_1":    r_at_1,
-            "recall_at_3":    r_at_3,
             "recall_at_8":    r_at_8,
             "mrr":            mrr_score,
             "rag_latency_s":  rag_latency,
@@ -298,8 +298,7 @@ def run_evaluation() -> None:
     print(f"  RAG win rate        : {summary['rag_win_rate']:.1%}")
     print(f"  RAG grounded rate   : {summary['rag_grounded_rate']:.1%}")
     print("\n── Retrieval ────────────────────────────────────")
-    print(f"  Recall@1            : {summary['recall_at_1_mean']:.4f}")
-    print(f"  Recall@3            : {summary['recall_at_3_mean']:.4f}")
+    print(f"  Recall@1            : {summary['recall_at_1_mean']:.4f}")ho
     print(f"  Recall@8            : {summary['recall_at_8_mean']:.4f}")
     print(f"  MRR                 : {summary['mrr_mean']:.4f}")
     if AUTORAG_AVAILABLE:
