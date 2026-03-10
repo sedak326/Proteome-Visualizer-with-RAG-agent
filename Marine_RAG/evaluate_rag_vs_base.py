@@ -36,6 +36,14 @@ from openai import OpenAI
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 
+# AutoRAG faithfulness (run in autorag conda env)
+try:
+    from autorag.evaluation.metric.generation import deepeval_faithfulness
+    from autorag.schema.metricinput import MetricInput
+    AUTORAG_AVAILABLE = True
+except ImportError:
+    AUTORAG_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -72,10 +80,18 @@ def _load_vectorstore() -> Chroma:
     return _vectorstore
 
 
-def rag_answer(question: str) -> str:
+def rag_retrieve(question: str) -> tuple[str, list[str], list[str]]:
+    """Returns (answer, retrieved_ids, retrieved_docs)."""
     vs = _load_vectorstore()
-    retrieved = vs.similarity_search(question, k=RAG_TOP_K)
-    context = "\n\n---\n\n".join(d.page_content for d in retrieved) if retrieved else ""
+    q_embedding = client.embeddings.create(model=EMBEDDING_MODEL, input=[question]).data[0].embedding
+    result = vs._collection.query(
+        query_embeddings=[q_embedding],
+        n_results=RAG_TOP_K,
+        include=["documents"],
+    )
+    retrieved_ids = result["ids"][0] if result["ids"] else []
+    docs = result["documents"][0] if result["documents"] else []
+    context = "\n\n---\n\n".join(docs) if docs else ""
 
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -101,7 +117,25 @@ def rag_answer(question: str) -> str:
         temperature=0,
         max_tokens=400,
     )
-    return resp.choices[0].message.content.strip()
+    return resp.choices[0].message.content.strip(), retrieved_ids, docs
+
+
+# ---------------------------------------------------------------------------
+# Retrieval metrics
+# ---------------------------------------------------------------------------
+
+def recall_at_k(retrieved_ids: list[str], gt_ids: list[str], k: int) -> float:
+    """1.0 if any of the top-k retrieved IDs appear in gt_ids, else 0.0."""
+    return float(bool(set(retrieved_ids[:k]) & set(gt_ids)))
+
+
+def mrr(retrieved_ids: list[str], gt_ids: list[str]) -> float:
+    """Reciprocal rank of the first retrieved ID that appears in gt_ids."""
+    gt_set = set(gt_ids)
+    for rank, uid in enumerate(retrieved_ids, start=1):
+        if uid in gt_set:
+            return 1.0 / rank
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -167,31 +201,71 @@ def run_evaluation() -> None:
 
         print(f"[{i+1}/{len(qa_df)}] {question[:80]}", end=" … ", flush=True)
 
-        rag_ans  = rag_answer(question)
+        retrieval_gt = list(row["retrieval_gt"][0]) if hasattr(row["retrieval_gt"][0], "__iter__") else list(row["retrieval_gt"])
+
+        t0 = time.time()
+        rag_ans, retrieved_ids, retrieved_docs = rag_retrieve(question)
+        rag_latency = time.time() - t0
+
+        t0 = time.time()
         base_ans = base_answer(question)
+        base_latency = time.time() - t0
 
         rag_sem  = sem_score(rag_ans,  gen_gt)
         base_sem = sem_score(base_ans, gen_gt)
         grounded = is_grounded(rag_ans)
 
-        print(f"rag={rag_sem:.3f}  base={base_sem:.3f}  grounded={grounded}")
+        r_at_1 = recall_at_k(retrieved_ids, retrieval_gt, k=1)
+        r_at_3 = recall_at_k(retrieved_ids, retrieval_gt, k=3)
+        r_at_8 = recall_at_k(retrieved_ids, retrieval_gt, k=RAG_TOP_K)
+        mrr_score = mrr(retrieved_ids, retrieval_gt)
+
+        print(f"rag={rag_sem:.3f}  base={base_sem:.3f}  grounded={grounded}  R@1={r_at_1:.0f}  R@8={r_at_8:.0f}  MRR={mrr_score:.3f}  rag_t={rag_latency:.2f}s  base_t={base_latency:.2f}s")
 
         records.append({
-            "qid":           row["qid"],
-            "query":         question,
-            "rag_answer":    rag_ans,
-            "base_answer":   base_ans,
-            "generation_gt": gen_gt,
-            "rag_sem_score": rag_sem,
-            "base_sem_score":base_sem,
-            "rag_grounded":  grounded,
-            "rag_wins":      int(rag_sem > base_sem),
+            "qid":            row["qid"],
+            "query":          question,
+            "rag_answer":     rag_ans,
+            "base_answer":    base_ans,
+            "generation_gt":  gen_gt,
+            "retrieval_gt":   retrieval_gt,
+            "retrieved_ids":  retrieved_ids,
+            "rag_sem_score":  rag_sem,
+            "base_sem_score": base_sem,
+            "rag_grounded":   grounded,
+            "rag_wins":       int(rag_sem > base_sem),
+            "recall_at_1":    r_at_1,
+            "recall_at_3":    r_at_3,
+            "recall_at_8":    r_at_8,
+            "mrr":            mrr_score,
+            "rag_latency_s":  rag_latency,
+            "base_latency_s": base_latency,
+            "retrieved_docs": retrieved_docs,
         })
 
         # Avoid hitting rate limits
         time.sleep(0.5)
 
     results_df = pd.DataFrame(records)
+
+    # Faithfulness scoring via AutoRAG deepeval_faithfulness
+    if AUTORAG_AVAILABLE:
+        print("\nScoring faithfulness via AutoRAG deepeval_faithfulness …")
+        metric_inputs = [
+            MetricInput(
+                generated_texts=row["rag_answer"],
+                retrieval_gt_contents=[[doc] for doc in row["retrieved_docs"]],
+            )
+            for _, row in results_df.iterrows()
+        ]
+        faithfulness_scores = deepeval_faithfulness(
+            metric_inputs, generator_module_type="openai_llm", llm="gpt-4o-mini"
+        )
+        results_df["faithfulness"] = faithfulness_scores
+    else:
+        print("\nAutoRAG not available — skipping faithfulness scoring.")
+        results_df["faithfulness"] = None
+
     results_df.to_parquet(RESULTS_PATH, index=False)
     print(f"\nSaved per-question results → {RESULTS_PATH}")
 
@@ -204,17 +278,37 @@ def run_evaluation() -> None:
         "rag_win_rate":       results_df["rag_wins"].mean(),
         "rag_grounded_rate":  results_df["rag_grounded"].mean(),
         "rag_delta_mean":     (results_df["rag_sem_score"] - results_df["base_sem_score"]).mean(),
+        "recall_at_1_mean":    results_df["recall_at_1"].mean(),
+        "recall_at_3_mean":    results_df["recall_at_3"].mean(),
+        "recall_at_8_mean":    results_df["recall_at_8"].mean(),
+        "mrr_mean":            results_df["mrr"].mean(),
+        "rag_latency_mean_s":  results_df["rag_latency_s"].mean(),
+        "base_latency_mean_s": results_df["base_latency_s"].mean(),
+        "latency_overhead_s":  (results_df["rag_latency_s"] - results_df["base_latency_s"]).mean(),
+        "faithfulness_mean":   results_df["faithfulness"].mean() if AUTORAG_AVAILABLE else None,
     }
     summary_df = pd.DataFrame([summary])
     summary_df.to_csv(SUMMARY_PATH, index=False)
 
-    print("\n── Summary ──────────────────────────────────────")
+    print("\n── Generation ───────────────────────────────────")
     print(f"  Questions evaluated : {n}")
     print(f"  RAG  sem_score mean : {summary['rag_sem_score_mean']:.4f}")
     print(f"  Base sem_score mean : {summary['base_sem_score_mean']:.4f}")
     print(f"  RAG delta (mean)    : {summary['rag_delta_mean']:+.4f}")
     print(f"  RAG win rate        : {summary['rag_win_rate']:.1%}")
     print(f"  RAG grounded rate   : {summary['rag_grounded_rate']:.1%}")
+    print("\n── Retrieval ────────────────────────────────────")
+    print(f"  Recall@1            : {summary['recall_at_1_mean']:.4f}")
+    print(f"  Recall@3            : {summary['recall_at_3_mean']:.4f}")
+    print(f"  Recall@8            : {summary['recall_at_8_mean']:.4f}")
+    print(f"  MRR                 : {summary['mrr_mean']:.4f}")
+    if AUTORAG_AVAILABLE:
+        print("\n── Faithfulness ─────────────────────────────────")
+        print(f"  Faithfulness mean   : {summary['faithfulness_mean']:.4f}")
+    print("\n── Latency ──────────────────────────────────────")
+    print(f"  RAG  mean latency   : {summary['rag_latency_mean_s']:.3f}s")
+    print(f"  Base mean latency   : {summary['base_latency_mean_s']:.3f}s")
+    print(f"  RAG overhead (mean) : {summary['latency_overhead_s']:+.3f}s")
     print(f"\nSaved summary → {SUMMARY_PATH}")
 
 

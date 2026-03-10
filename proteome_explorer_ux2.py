@@ -4,8 +4,10 @@ User Flow: Select Animals (with icons) → Watch Animation → Explore Proteomes
 Deep sea ocean theme with bioluminescent accents
 """
 
+import re
+import json
 import dash
-from dash import dcc, html, Input, Output, State, ctx, dash_table
+from dash import dcc, html, Input, Output, State, ctx, dash_table, ALL
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
@@ -97,6 +99,60 @@ def build_spatial_summary(active_species, loaded_data):
     return "\n".join(lines)
 
 
+def build_cluster_summary(active_species, loaded_data):
+    """Build a per-cluster breakdown from loaded_data (always available, no selection needed)."""
+    if not loaded_data or not active_species:
+        return ""
+    active_data = [sd for sd in loaded_data if sd['name'] in active_species]
+    if not active_data:
+        return ""
+
+    # cluster_id -> {species_name -> [protein_names]}
+    cluster_info = {}
+    for sd in active_data:
+        species_name = sd['name']
+        display = SPECIES_DATA.get(species_name, {}).get('display_name', species_name)
+        for rec in sd.get('df', []):
+            cl = rec.get('Cluster Label')
+            if cl is None or str(cl) == 'nan':
+                continue
+            cl = int(cl)
+            cluster_info.setdefault(cl, {})
+            cluster_info[cl].setdefault(display, [])
+            pname = str(rec.get('Protein names', '') or '').split('(')[0].strip()[:60]
+            if not pname:
+                entry_id = str(rec.get('Entry', '') or '')
+                ann = ANNOTATIONS.get(entry_id, {})
+                pname = (ann.get('desc', '') or '').split(' OS=')[0].strip()[:60]
+            if pname:
+                cluster_info[cl][display].append(pname)
+
+    if not cluster_info:
+        return ""
+
+    # Determine which clusters are unique vs shared
+    lines = ["Cluster summary (all clusters visible on screen):"]
+    sorted_clusters = sorted(cluster_info.items(), key=lambda x: -sum(len(v) for v in x[1].values()))
+    for cl, species_proteins in sorted_clusters[:30]:  # cap at 30 clusters
+        all_species = list(species_proteins.keys())
+        sharing = "unique to " + all_species[0] if len(all_species) == 1 else "shared (" + ", ".join(all_species) + ")"
+        total = sum(len(v) for v in species_proteins.values())
+        # Sample up to 3 representative protein names
+        sample_names = []
+        for names_list in species_proteins.values():
+            for n in names_list:
+                if n not in sample_names:
+                    sample_names.append(n)
+                if len(sample_names) >= 3:
+                    break
+            if len(sample_names) >= 3:
+                break
+        sample_str = "; ".join(sample_names) if sample_names else "no name info"
+        lines.append(f"  Cluster {cl} ({sharing}): {total} proteins — e.g. {sample_str}")
+
+    return "\n".join(lines)
+
+
 def build_visual_context(active_species, selected_data, loaded_data=None):
     """Build a text summary of what's currently on screen."""
     parts = []
@@ -109,6 +165,10 @@ def build_visual_context(active_species, selected_data, loaded_data=None):
     spatial = build_spatial_summary(active_species, loaded_data)
     if spatial:
         parts.append(spatial)
+
+    cluster_summary = build_cluster_summary(active_species, loaded_data)
+    if cluster_summary:
+        parts.append(cluster_summary)
 
     if selected_data and selected_data.get('points'):
         # Must match trace order in update_interactive_graph: loaded_data order filtered to active
@@ -231,6 +291,33 @@ def route_message(chat_history, new_message, visual_context=""):
                     "You are a router for an enthusiastic nerdy-scientist lab guide on a proteome "
                     "visualization portal. Given a conversation, what the user sees on screen, "
                     "and their latest message, decide:\n"
+                    "- DISCOVER: — use when the user asks you to analyze, scan, or find interesting "
+                    "clusters or patterns across the whole proteome: 'analyze my data', 'what's "
+                    "interesting?', 'find me something cool', 'discover insights', 'what should I "
+                    "look at?'. Output just 'DISCOVER:' with nothing after it.\n"
+                    "- CONTROL: <command> — use when the user wants to change a plot setting: "
+                    "filter proteins ('show unique proteins', 'show shared proteins', 'show all proteins'), "
+                    "adjust point size ('make the dots bigger', 'set size to 7', 'smaller points'), "
+                    "adjust opacity ('make it more transparent', 'set opacity to 0.5'), "
+                    "or asks about zoom/pan/screenshot (toolbar actions). "
+                    "Output 'CONTROL: ' followed by the command verbatim, nothing else.\n"
+                    "- SPECIES: <action> <species name> — use when the user wants to add, remove, "
+                    "or change which species are shown on the plot. Actions: 'add <name>', "
+                    "'remove <name>', 'show only <name>', 'add all'. Examples: "
+                    "'compare this to harbor seal' → SPECIES: add harbor seal, "
+                    "'remove orca from the plot' → SPECIES: remove orca, "
+                    "'show only gray whale' → SPECIES: show only gray whale, "
+                    "'add all species' → SPECIES: add all, "
+                    "'add bottlenose dolphin' → SPECIES: add bottlenose dolphin. "
+                    "Output 'SPECIES: ' followed by the action phrase, nothing else.\n"
+                    "- HIGHLIGHT: <search term> — use ONLY when the user uses an explicit action "
+                    "verb to locate something on the plot: 'highlight cluster 93', 'show me cluster 5 "
+                    "on the plot', 'mark cluster 7', 'highlight protein A0A2U3', 'where is myoglobin "
+                    "on the plot?', 'point to cluster 12'. Do NOT use HIGHLIGHT for questions like "
+                    "'tell me more about cluster X', 'what is in cluster X', 'explain cluster X' — "
+                    "those are QUERY or VISUAL. Only use HIGHLIGHT when the user's clear intent is to "
+                    "move the visual focus, not to get information. Output just the cluster number, "
+                    "Entry ID, or protein name after HIGHLIGHT:, nothing else.\n"
                     "- VISUAL: <the question> — use when the user wants you to DESCRIBE what's "
                     "on screen: 'what do I see?', 'explain this cluster', 'what do these proteins "
                     "have in common?', 'what's in the top-left?'. Pure observation questions.\n"
@@ -246,7 +333,7 @@ def route_message(chat_history, new_message, visual_context=""):
                     "who is genuinely interested but not over the top — no 'Wow!', 'Oh awesome!', "
                     "or hollow exclamations. React naturally and move the conversation forward.> "
                     "— conversational (greeting, reaction, thanks)\n"
-                    "Output only one line starting with QUERY:, VISUAL:, or CHAT:"
+                    "Output only one line starting with DISCOVER:, CONTROL:, SPECIES:, HIGHLIGHT:, QUERY:, VISUAL:, or CHAT:"
                 )},
                 {"role": "user", "content": user_content}
             ],
@@ -254,7 +341,15 @@ def route_message(chat_history, new_message, visual_context=""):
             max_tokens=200,
         )
         result = resp.choices[0].message.content.strip()
-        if result.startswith("QUERY:"):
+        if result.startswith("DISCOVER:"):
+            return ("discover", "")
+        elif result.startswith("CONTROL:"):
+            return ("control", result[8:].strip())
+        elif result.startswith("SPECIES:"):
+            return ("species", result[8:].strip())
+        elif result.startswith("HIGHLIGHT:"):
+            return ("highlight", result[10:].strip())
+        elif result.startswith("QUERY:"):
             return ("rag", result[6:].strip())
         elif result.startswith("VISUAL:"):
             return ("visual", result[7:].strip())
@@ -324,7 +419,61 @@ def answer_with_context(question, visual_context, chat_history):
         return f"Error: {str(e)}"
 
 
-def query_rag(query_text):
+def _build_sources_block(retrieved):
+    """Build a deduplicated sources string from a list of Chroma Document objects."""
+    if not retrieved:
+        return ""
+    _EMM_BOOK = "Encyclopedia of Marine Mammals (3rd Ed.)"
+    doc_pages   = {}
+    doc_ids     = {}
+    doc_display = {}
+    for d in retrieved:
+        meta = d.metadata
+        doc = meta.get("document_name", "").strip()
+        if not doc:
+            continue
+        chunk_id = meta.get("id", "")
+        page = str(meta.get("page_range") or meta.get("page_number") or "").strip()
+        chapter = meta.get("chapter", "").strip()
+        if chunk_id.startswith("html_"):
+            key = f"html::{doc}"
+            if key not in doc_display:
+                chap_str = f"{chapter}: " if chapter and chapter not in ("Unknown Chapter", "") else ""
+                doc_display[key] = f"*{_EMM_BOOK}* — {chap_str}{doc}"
+        else:
+            key = doc
+            doc_display.setdefault(key, doc)
+        doc_pages.setdefault(key, set())
+        if page:
+            doc_pages[key].add(page)
+        doc_ids.setdefault(key, chunk_id)
+
+    def _guess_doi(doc_name, chunk_id):
+        m = re.search(r'elife[_\s](\d+)', chunk_id, re.IGNORECASE) or \
+            re.search(r'elife[_\s](\d+)', doc_name, re.IGNORECASE)
+        if m:
+            return f"https://doi.org/10.7554/eLife.{m.group(1)}"
+        m = re.search(r'srep(\d+)', chunk_id, re.IGNORECASE) or \
+            re.search(r'srep(\d+)', doc_name, re.IGNORECASE)
+        if m:
+            return f"https://doi.org/10.1038/srep{m.group(1)}"
+        return None
+
+    source_lines = []
+    for key, pages in doc_pages.items():
+        page_str = ", ".join(
+            sorted(pages, key=lambda p: int(p.split('-')[0]) if p.split('-')[0].isdigit() else 0)
+        ) if pages else ""
+        label = doc_display.get(key, key)
+        doi = _guess_doi(key, doc_ids.get(key, ""))
+        line = f"[{label}]({doi})" if doi else label
+        if page_str:
+            line += f" (p. {page_str})"
+        source_lines.append(line)
+    return "📚 " + " · ".join(source_lines) if source_lines else ""
+
+
+def query_rag(query_text, visual_context=""):
     """Retrieve relevant chunks from Chroma and generate an answer via GPT-4o-mini."""
     try:
         vs = _load_vectorstore()
@@ -335,33 +484,44 @@ def query_rag(query_text):
         else:
             context = "\n\n---\n\n".join(d.page_content for d in retrieved)
 
+        system_content = (
+            "You are a marine biology knowledge assistant. "
+            "You have two sources of information:\n"
+            "1. SCREEN DATA: What the user currently sees in the proteome visualizer "
+            "(species displayed, UMAP clusters, selected proteins with IDs, domains, etc.). "
+            "Use this to answer questions about specific clusters, proteins, or patterns "
+            "visible in the current session.\n"
+            "2. LITERATURE: A curated corpus of marine mammal research papers and species accounts "
+            "(context chunks below). Each chunk starts with its source location, so cite naturally "
+            "(e.g. 'According to Smith 2023, page 4...').\n"
+            "Prioritise SCREEN DATA for questions about specific proteins, clusters, or "
+            "what is currently displayed. Use LITERATURE for biology background and mechanisms. "
+            "If neither source covers the question, answer from general marine biology knowledge "
+            "but note: 'This is from general knowledge, not the specific literature.' "
+            "Never fabricate citations or paper titles."
+        )
+
+        sources_block = _build_sources_block(retrieved)
+
+        user_parts = []
+        if visual_context:
+            user_parts.append(f"Screen data (current visualization):\n{visual_context}")
+        if context:
+            user_parts.append(f"Literature context:\n{context}")
+        user_parts.append(f"Question: {query_text}\n\nAnswer:")
+
         resp = _openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": (
-                    "You are a marine biology knowledge assistant. "
-                    "You have access to a curated corpus of marine mammal research papers "
-                    "and species accounts (context chunks below). "
-                    "Prioritise answering from the context — each chunk starts with its source "
-                    "location (Document, Chapter, Section, Page), so cite naturally "
-                    "(e.g. 'According to Smith 2023, page 4...'). "
-                    "If the context chunks are not relevant to the question, answer from your "
-                    "general marine biology knowledge but clearly note: "
-                    "'This is from general knowledge, not the specific literature.' "
-                    "Never fabricate citations or paper titles."
-                )},
-                {"role": "user", "content": (
-                    f"Context:\n{context}\n\nQuestion: {query_text}\n\nAnswer:"
-                    if context else
-                    f"Question: {query_text}\n\nAnswer:"
-                )},
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": "\n\n".join(user_parts)},
             ],
             temperature=0,
             max_tokens=400,
         )
-        return resp.choices[0].message.content.strip()
+        return resp.choices[0].message.content.strip(), sources_block
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {str(e)}", ""
 
 
 def rewrite_as_guide(raw_answer, original_question, chat_history, visual_context=""):
@@ -515,14 +675,6 @@ SPECIES_DATA = {
         'display_name': 'Harbor Seal',
         'key': 'harborseal'
     },
-    'King Cobra': {
-        'csv': str(BASE_DIR / 'umap_output/King Cobra_umap.csv'),
-        'image': str(BASE_DIR / 'animal_pics/cobra.png'),
-        'color': '#BFAA00',
-        'glow': 'rgba(191, 170, 0, 0.4)',
-        'display_name': 'King Cobra',
-        'key': 'cobra'
-    }
 }
 
 SAMPLE_SIZE = 3000
@@ -782,6 +934,8 @@ from flask import send_from_directory
 @app.server.route('/animations/<path:filename>')
 def serve_animation(filename):
     return send_from_directory(str(PRERENDERED_DIR), filename)
+
+
 
 # Ocean theme CSS with waves, particles, and glassmorphism
 app.index_string = '''
@@ -1297,9 +1451,14 @@ app.layout = html.Div([
 
         # Full-width Plot
         html.Div([
-            dcc.Graph(id='interactive-graph',
-                     style={'height': 'calc(100vh - 200px)', 'width': '100%'},
-                     config={'displayModeBar': True, 'displaylogo': False})
+            dcc.Loading(
+                dcc.Graph(id='interactive-graph',
+                         style={'height': 'calc(100vh - 200px)', 'width': '100%'},
+                         config={'displayModeBar': True, 'displaylogo': False}),
+                type='circle',
+                color='#64ffda',
+                style={'height': 'calc(100vh - 200px)'},
+            )
         ], style={'background': '#ffffff',
                  'borderRadius': 16, 'padding': 10,
                  'boxShadow': '0 10px 40px rgba(0, 0, 0, 0.2)',
@@ -1308,18 +1467,51 @@ app.layout = html.Div([
         # Protein Selection Table - Below the plot (full width)
         html.Div([
             html.Div([
-                html.H3("Selected Proteins",
-                       style={'color': '#64ffda', 'marginBottom': 8,
+                html.H3("Protein Table",
+                       style={'color': '#64ffda', 'marginBottom': 0,
                              'fontSize': 12, 'fontFamily': '"JetBrains Mono", monospace',
                              'letterSpacing': '2px', 'textTransform': 'uppercase',
-                             'fontWeight': '500', 'display': 'inline-block'}),
-                html.Span(" — Use lasso or click to select proteins from the plot",
+                             'fontWeight': '500'}),
+                html.Span("Lasso proteins on the plot, or search below to find and highlight them",
                          style={'fontSize': 12, 'color': '#a8dadc',
                                'fontFamily': '"JetBrains Mono", monospace',
-                               'letterSpacing': '0.5px'})
-            ], style={'marginBottom': 15}),
+                               'letterSpacing': '0.5px'}),
+            ], style={'marginBottom': 14}),
+
+            # Search bar — now lives here, clearly associated with the table
+            html.Div([
+                dcc.Input(
+                    id='highlight-search-input',
+                    type='text',
+                    placeholder='Search by cluster # or protein name (e.g. "myoglobin", "93")...',
+                    debounce=False,
+                    n_submit=0,
+                    style={
+                        'flex': '1', 'background': 'rgba(255,255,255,0.06)',
+                        'border': '1px solid rgba(100,255,218,0.2)', 'borderRadius': 8,
+                        'color': '#f1faee', 'padding': '7px 12px', 'fontSize': 12,
+                        'fontFamily': '"JetBrains Mono", monospace', 'outline': 'none',
+                    }
+                ),
+                html.Button('🔍 Find & Highlight', id='highlight-search-btn', n_clicks=0, style={
+                    'background': 'linear-gradient(135deg, #64ffda, #457b9d)',
+                    'color': '#0a192f', 'border': 'none', 'borderRadius': 8,
+                    'padding': '7px 14px', 'fontSize': 12, 'fontWeight': '700',
+                    'cursor': 'pointer', 'fontFamily': '"Inter", sans-serif', 'whiteSpace': 'nowrap',
+                }),
+                html.Button('✕ Clear', id='highlight-clear-btn', n_clicks=0, style={
+                    'background': 'rgba(255,255,255,0.06)',
+                    'color': '#a8dadc', 'border': '1px solid rgba(100,255,218,0.15)',
+                    'borderRadius': 8, 'padding': '7px 12px', 'fontSize': 12,
+                    'cursor': 'pointer', 'fontFamily': '"Inter", sans-serif',
+                }),
+            ], style={
+                'display': 'flex', 'alignItems': 'center', 'gap': '8px',
+                'marginBottom': 16,
+            }),
+
             html.Div(id='selection-table-container',
-                    children="No proteins selected. Click or drag to select.",
+                    children="No proteins selected. Use the lasso tool on the plot, or search above.",
                     style={'fontSize': 13, 'fontFamily': '"Inter", sans-serif', 'color': '#a8dadc'})
         ], className='glass-card',
            style={'marginTop': 20, 'padding': 25,
@@ -1336,24 +1528,47 @@ app.layout = html.Div([
     dcc.Interval(id='animation-timer', interval=200, disabled=True, n_intervals=0),
     dcc.Interval(id='fade-complete-timer', interval=800, disabled=True, n_intervals=0, max_intervals=1),
     dcc.Store(id='animation-path-store', data=None),
+    dcc.Store(id='highlight-store', data=None),
+    dcc.Store(id='discoveries-store', data=None),
 
     # Chat widget - floating toggle + panel
     html.Button('AI', id='chat-toggle-btn', n_clicks=0, className='chat-toggle'),
     html.Div([
-        html.Div("Your Lab Guide", className='chat-header'),
+        html.Div([
+            html.Span("Your Lab Guide", style={'flex': '1'}),
+            dcc.Loading(
+                html.Div(id='discover-status'),
+                type='circle',
+                color='#64ffda',
+                style={'display': 'inline-flex', 'alignItems': 'center',
+                       'width': 20, 'height': 20},
+            ),
+            html.Button('✨ Discover', id='discover-btn', n_clicks=0, style={
+                'background': 'linear-gradient(135deg, rgba(100,255,218,0.15), rgba(69,123,157,0.15))',
+                'border': '1px solid rgba(100,255,218,0.35)',
+                'borderRadius': 8, 'color': '#64ffda',
+                'fontSize': 11, 'fontWeight': '600', 'cursor': 'pointer',
+                'padding': '4px 10px', 'fontFamily': '"Inter", sans-serif',
+                'transition': 'all 0.2s ease', 'letterSpacing': '0.5px',
+            }),
+        ], className='chat-header', style={'display': 'flex', 'alignItems': 'center', 'gap': '10px'}),
         html.Div(
             id='chat-messages-display',
             children=[
                 html.Div(dcc.Markdown(
                     "Hey there! \U0001F30A Welcome to the **Proteome Explorer**! "
                     "Each dot on this plot is a *protein* — and when dots **cluster together**, "
-                    "it means those proteins share similar structure or function. Pretty neat, right?",
+                    "it means those proteins share similar structure or function.",
                     className='chat-md'),
                     className='chat-msg chat-msg-assistant'),
                 html.Div(dcc.Markdown(
-                    "Here's a fun thing to try: grab the **lasso tool** \U0001F3AF from the "
-                    "toolbar (top-left of the plot) and draw around a cluster. "
-                    "You'll see the protein details pop up in the table below!",
+                    "Here's what you can do:\n\n"
+                    "- \U0001F3AF **Lasso** proteins on the plot to see their details in the table below\n"
+                    "- \U0001F50D **Search** for a cluster number or protein name using the search bar in the Protein Table\n"
+                    "- \U0001F4AC **Ask me** anything — *\"what is myoglobin?\"*, *\"highlight cluster 14\"*, *\"compare to harbor seal\"*\n"
+                    "- \U0001F40B **Add or remove species** by asking — *\"add orca\"*, *\"remove sea lion\"*, *\"show only gray whale\"*\n"
+                    "- \U0001F3A8 **Control the plot** by asking — *\"show unique proteins\"*, *\"make the dots bigger\"*, *\"set opacity to 0.5\"*\n"
+                    "- **✨ Discover** — hit the button above to let me find the most biologically interesting clusters for you!",
                     className='chat-md'),
                     className='chat-msg chat-msg-assistant'),
             ],
@@ -1722,6 +1937,395 @@ app.clientside_callback(
 )
 
 
+_QUESTION_PREFIX_RE = re.compile(
+    r'^(what\s+is|what\s+are|what\s+does|tell\s+me\s+about|where\s+is|'
+    r'explain|describe|how\s+does|why\s+is|find|locate|show\s+me|'
+    r'search\s+for|look\s+up|give\s+me\s+info\s+on|do\s+you\s+know\s+about)\s+',
+    re.IGNORECASE,
+)
+
+def build_discovery_context(active_species, loaded_data):
+    """Build a per-cluster domain-enriched summary for the discovery GPT call."""
+    if not loaded_data or not active_species:
+        return ""
+    active_data = [sd for sd in loaded_data if sd['name'] in active_species]
+    if not active_data:
+        return ""
+
+    # cluster -> {species_name -> count}, cluster -> {domain -> count}
+    cluster_species = {}
+    cluster_domains = {}
+    cluster_protein_names = {}
+
+    for sd in active_data:
+        display = SPECIES_DATA.get(sd['name'], {}).get('display_name', sd['name'])
+        for rec in sd.get('df', []):
+            cl = rec.get('Cluster Label')
+            if cl is None or str(cl) == 'nan':
+                continue
+            cl = int(cl)
+            entry_id = str(rec.get('Entry', '') or '')
+
+            cluster_species.setdefault(cl, {})
+            cluster_species[cl][display] = cluster_species[cl].get(display, 0) + 1
+
+            ann = ANNOTATIONS.get(entry_id, {})
+            for dom in (ann.get('hmm_labels', '') or '').split(';'):
+                dom = dom.strip()
+                if dom:
+                    cluster_domains.setdefault(cl, {})
+                    cluster_domains[cl][dom] = cluster_domains[cl].get(dom, 0) + 1
+
+            pname = (ann.get('desc', '') or '').split(' OS=')[0].strip()[:60]
+            if pname:
+                cluster_protein_names.setdefault(cl, set()).add(pname)
+
+    if not cluster_species:
+        return ""
+
+    all_active_displays = {SPECIES_DATA[s]['display_name'] for s in active_species if s in SPECIES_DATA}
+
+    lines = [f"Active species: {', '.join(all_active_displays)}\n",
+             "Per-cluster summary (sorted by size, top 60):"]
+    sorted_clusters = sorted(
+        cluster_species.items(),
+        key=lambda x: -sum(x[1].values())
+    )[:60]
+
+    for cl, sp_counts in sorted_clusters:
+        total = sum(sp_counts.values())
+        sharing = "unique to " + next(iter(sp_counts)) if len(sp_counts) == 1 else "shared: " + ", ".join(sp_counts)
+        top_domains = sorted(cluster_domains.get(cl, {}).items(), key=lambda x: -x[1])[:5]
+        dom_str = ", ".join(f"{d}({n})" for d, n in top_domains) or "no domain info"
+        sample_names = list(cluster_protein_names.get(cl, set()))[:2]
+        name_str = "; ".join(sample_names) if sample_names else ""
+        lines.append(
+            f"  Cluster {cl} [{sharing}] — {total} proteins | Domains: {dom_str}"
+            + (f" | e.g. {name_str}" if name_str else "")
+        )
+
+    return "\n".join(lines)
+
+
+def discover_insights(discovery_context):
+    """Ask GPT to identify 4-5 biologically interesting clusters and return structured list."""
+    import json, re as _re
+    try:
+        resp = _openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": (
+                    "You are a marine mammal biologist analyzing a proteome UMAP visualization. "
+                    "You are given a summary of protein clusters — each cluster groups proteins with "
+                    "similar structure/function. Identify 4-5 clusters that are biologically interesting.\n\n"
+                    "Look for:\n"
+                    "- Oxygen/diving adaptations: myoglobin, hemoglobin, neuroglobin, cytochrome oxidase\n"
+                    "- Immune function: MHC, immunoglobulin, complement\n"
+                    "- Sensory biology: rhodopsin, olfactory receptors, prestin (hearing)\n"
+                    "- Energy metabolism: ATP synthase, NADH dehydrogenase, succinate dehydrogenase\n"
+                    "- Thermoregulation: uncoupling proteins\n"
+                    "- Convergent evolution: proteins shared across distantly related species\n"
+                    "- Species-unique clusters that may explain specialization\n\n"
+                    "Return a JSON object with key \"insights\" containing a list of 4-5 objects. "
+                    "Each object must have: cluster (int), emoji (1 emoji), title (3-5 word label), "
+                    "description (2-3 sentences, plain language, mention which species), "
+                    "search_term (cluster number as string).\n"
+                    "Only pick clusters with meaningful domain annotations. "
+                    "Do not fabricate domain info — only use what is in the data provided."
+                )},
+                {"role": "user", "content": discovery_context},
+            ],
+            temperature=0.4,
+            max_tokens=900,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content.strip()
+        print(f"[discover_insights] raw response: {raw[:300]}")
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+        for key in parsed:
+            if isinstance(parsed[key], list):
+                return parsed[key]
+        print(f"[discover_insights] unexpected structure: {list(parsed.keys())}")
+        return []
+    except Exception as e:
+        print(f"[discover_insights] ERROR: {e}")
+        return []
+
+
+_GENERIC_BIOLOGY_TERMS = {
+    'protein', 'proteins', 'proteome', 'proteomes', 'enzyme', 'enzymes',
+    'gene', 'genes', 'cluster', 'clusters', 'species', 'organism', 'organisms',
+    'domain', 'domains', 'sequence', 'sequences', 'amino acid', 'amino acids',
+    'peptide', 'peptides', 'cell', 'cells', 'molecule', 'molecules',
+    'function', 'functions', 'structure', 'structures', 'biology', 'marine',
+    'mammal', 'mammals', 'whale', 'seal', 'dolphin', 'orca',
+}
+
+def _extract_protein_search_term(query):
+    """Strip leading question words and return the core search term.
+    Returns None if the term is too short or a generic biology word."""
+    cleaned = _QUESTION_PREFIX_RE.sub('', query.strip()).rstrip('?').strip()
+    if len(cleaned) < 4:
+        return None
+    if cleaned.lower() in _GENERIC_BIOLOGY_TERMS:
+        return None
+    return cleaned
+
+
+def _dataset_lookup_context(query, loaded_data, active_species):
+    """Search dataset for a protein name and return a formatted context string, or ''."""
+    term = _extract_protein_search_term(query)
+    if not term:
+        return ''
+    matches = _resolve_highlight_query(term, loaded_data, active_species)
+    if not matches or not matches.get('entry_ids'):
+        return ''
+    # If we matched more than 200 proteins the term is too generic — skip
+    if len(matches['entry_ids']) > 200:
+        return ''
+    rows = _build_protein_rows(matches['entry_ids'], loaded_data, active_species)
+    if not rows:
+        return ''
+    # Group by cluster then species
+    cluster_map = {}
+    for r in rows:
+        cl = r['Cluster']
+        sp = r['Organism']
+        cluster_map.setdefault(cl, {}).setdefault(sp, 0)
+        cluster_map[cl][sp] += 1
+    lines = [f'Dataset lookup for "{term}" ({len(rows)} match{"es" if len(rows) != 1 else ""}):']
+    for cl, species_counts in sorted(cluster_map.items(), key=lambda x: x[0]):
+        sp_str = ', '.join(f'{sp} ({n})' for sp, n in species_counts.items())
+        lines.append(f'  Cluster {cl}: {sp_str}')
+    # Sample a few protein names for context
+    sample_names = list({r['Protein Name'] for r in rows if r['Protein Name'] != '—'})[:3]
+    if sample_names:
+        lines.append(f'  Example names: {"; ".join(sample_names)}')
+    return '\n'.join(lines)
+
+
+def _resolve_highlight_query(query, loaded_data, active_species):
+    """Return highlight-store data dict for a cluster number, Entry ID, or protein name query."""
+    if not loaded_data or not query:
+        return None
+    query = query.strip()
+    active_species = active_species or []
+    active_data = [sd for sd in loaded_data if sd['name'] in active_species]
+    if not active_data:
+        return None
+
+    xs, ys, label = [], [], ""
+    entry_ids = []
+
+    # 1. Try cluster number
+    try:
+        cluster_num = int(query.lstrip('#').strip())
+        for sd in active_data:
+            for rec in sd['df']:
+                cl = rec.get('Cluster Label')
+                if cl is not None and str(cl) != 'nan' and int(cl) == cluster_num:
+                    xs.append(rec['UMAP 1 Scaled'])
+                    ys.append(rec['UMAP 2 Scaled'])
+                    entry_ids.append((sd['name'], str(rec.get('Entry', ''))))
+        if xs:
+            label = f"Cluster {cluster_num}"
+        return {"xs": xs, "ys": ys, "label": label, "entry_ids": entry_ids} if xs else None
+    except ValueError:
+        pass
+
+    # 2. Try exact/prefix Entry ID match
+    query_up = query.upper()
+    for sd in active_data:
+        for rec in sd['df']:
+            entry = str(rec.get('Entry', '') or '').upper()
+            if entry == query_up or entry.startswith(query_up):
+                xs.append(rec['UMAP 1 Scaled'])
+                ys.append(rec['UMAP 2 Scaled'])
+                entry_ids.append((sd['name'], str(rec.get('Entry', ''))))
+                label = str(rec.get('Entry', query))
+    if xs:
+        return {"xs": xs, "ys": ys, "label": label, "entry_ids": entry_ids}
+
+    # 3. Protein name search — match against CSV 'Protein names' and ANNOTATIONS desc
+    query_lower = query.lower()
+    for sd in active_data:
+        for rec in sd['df']:
+            entry_id = str(rec.get('Entry', '') or '')
+            # Check CSV protein name
+            csv_name = str(rec.get('Protein names', '') or '').lower()
+            # Check annotation desc
+            ann = ANNOTATIONS.get(entry_id, {})
+            ann_name = (ann.get('desc', '') or '').split(' OS=')[0].lower()
+            if query_lower in csv_name or query_lower in ann_name:
+                xs.append(rec['UMAP 1 Scaled'])
+                ys.append(rec['UMAP 2 Scaled'])
+                entry_ids.append((sd['name'], entry_id))
+    if xs:
+        label = f'"{query}"'
+        return {"xs": xs, "ys": ys, "label": label, "entry_ids": entry_ids}
+
+    return None
+
+
+def _resolve_ui_command(text, current_size, current_opacity):
+    """Parse a CONTROL: command and return (filter_val, size_val, opacity_val, reply).
+
+    Any value that shouldn't change is returned as dash.no_update.
+    """
+    t = text.lower().strip()
+    no = dash.no_update
+
+    # --- Protein filter ---
+    if any(w in t for w in ['unique', 'species-specific', 'species specific']):
+        return 'unique', no, no, "Showing only **unique** proteins — those found in just one species. 🔬"
+    if 'shared' in t or 'common' in t or 'conserved' in t:
+        return 'shared', no, no, "Showing only **shared** proteins — those found across multiple species. 🌊"
+    if any(p in t for p in ['all protein', 'show all', 'reset filter', 'clear filter', 'no filter']):
+        return 'all', no, no, "Showing **all proteins** — no filter applied."
+
+    # --- Point size ---
+    import re as _re
+    size_match = _re.search(r'\b(?:size|point size|dot size)\s*(?:to\s*)?(\d+)', t)
+    if size_match:
+        val = max(1, min(10, int(size_match.group(1))))
+        return no, val, no, f"Point size set to **{val}**."
+    if any(p in t for p in ['bigger', 'larger', 'increase size', 'make larger', 'size up', 'zoom in on dot', 'enlarge']):
+        val = min(10, (current_size or 3) + 2)
+        return no, val, no, f"Made the points bigger (size {val})."
+    if any(p in t for p in ['smaller', 'tinier', 'decrease size', 'make smaller', 'size down', 'shrink']):
+        val = max(1, (current_size or 3) - 2)
+        return no, val, no, f"Made the points smaller (size {val})."
+
+    # --- Opacity ---
+    opacity_match = _re.search(r'\bopacity\s*(?:to\s*)?(0?\.\d+|\d+(?:\.\d+)?)', t)
+    if opacity_match:
+        val = max(0.1, min(1.0, float(opacity_match.group(1))))
+        return no, no, val, f"Opacity set to **{val:.1f}**."
+    if any(p in t for p in ['more transparent', 'less opaque', 'fade', 'lower opacity', 'decrease opacity']):
+        val = max(0.1, round((current_opacity or 1.0) - 0.2, 1))
+        return no, no, val, f"Opacity reduced to **{val:.1f}**."
+    if any(p in t for p in ['more opaque', 'less transparent', 'brighter', 'higher opacity', 'increase opacity', 'full opacity']):
+        val = min(1.0, round((current_opacity or 1.0) + 0.2, 1))
+        return no, no, val, f"Opacity increased to **{val:.1f}**."
+
+    # --- Plotly toolbar things (guide user) ---
+    if any(p in t for p in ['zoom', 'pan', 'reset', 'autoscale', 'download', 'screenshot', 'save image']):
+        return no, no, no, (
+            "For zooming, panning, and resetting the view, use the **toolbar in the top-right corner of the plot** — "
+            "it has zoom in/out, pan, lasso, and reset axes buttons. To save a screenshot, click the camera icon there."
+        )
+
+    return no, no, no, (
+        f"I didn't quite understand that control command: *{text}*. "
+        "You can say things like: *'show unique proteins'*, *'show shared proteins'*, "
+        "*'make the points bigger'*, *'set opacity to 0.5'*."
+    )
+
+
+def _resolve_species_command(text, active_species):
+    """Parse a SPECIES: command and return (new_active_species, reply_message).
+
+    Supported actions (case-insensitive in text):
+      add <name>        — add species to active list
+      remove <name>     — remove species from active list
+      show only <name>  — show only that species
+      add all           — show all species
+      remove all / hide all — keep only one (prevent empty list)
+    Returns (new_list, reply) or (None, error_message).
+    """
+    active_species = list(active_species or [])
+    all_species = list(SPECIES_DATA.keys())
+
+    def fuzzy_match(name_query):
+        """Return SPECIES_DATA key for best match, or None."""
+        q = name_query.lower().strip()
+        # Exact key match
+        for k in all_species:
+            if k.lower() == q:
+                return k
+        # Substring match on display_name or key
+        candidates = []
+        for k in all_species:
+            display = SPECIES_DATA[k]['display_name'].lower()
+            key = SPECIES_DATA[k]['key'].lower()
+            if q in display or q in key or display in q:
+                candidates.append(k)
+        return candidates[0] if len(candidates) == 1 else (candidates[0] if candidates else None)
+
+    text = text.strip()
+    text_lower = text.lower()
+
+    # "add all" / "show all"
+    if any(p in text_lower for p in ['add all', 'show all', 'all species', 'every species']):
+        return all_species, f"Showing all species on the plot! 🌊"
+
+    # "show only <name>"
+    for prefix in ['show only ', 'only show ', 'isolate ']:
+        if text_lower.startswith(prefix):
+            name_q = text[len(prefix):].strip()
+            match = fuzzy_match(name_q)
+            if match:
+                display = SPECIES_DATA[match]['display_name']
+                return [match], f"Isolating **{display}** on the plot."
+            return None, f"I couldn't find a species called **{name_q}**. Available: {', '.join(SPECIES_DATA[k]['display_name'] for k in all_species)}."
+
+    # "remove <name>" / "hide <name>"
+    for prefix in ['remove ', 'hide ', 'take off ', 'turn off ']:
+        if text_lower.startswith(prefix):
+            name_q = text[len(prefix):].strip()
+            match = fuzzy_match(name_q)
+            if match:
+                display = SPECIES_DATA[match]['display_name']
+                if match not in active_species:
+                    return None, f"**{display}** is already hidden."
+                if len(active_species) <= 1:
+                    return None, f"Can't remove **{display}** — you need at least one species visible."
+                new_list = [s for s in active_species if s != match]
+                return new_list, f"Removed **{display}** from the plot."
+            return None, f"I couldn't find a species called **{name_q}**."
+
+    # "add <name>" / "compare to <name>" / "compare with <name>"
+    for prefix in ['add ', 'compare to ', 'compare with ', 'add in ', 'also show ', 'include ']:
+        if text_lower.startswith(prefix):
+            name_q = text[len(prefix):].strip()
+            match = fuzzy_match(name_q)
+            if match:
+                display = SPECIES_DATA[match]['display_name']
+                if match in active_species:
+                    return None, f"**{display}** is already visible on the plot."
+                return active_species + [match], f"Added **{display}** to the plot for comparison! 🔬"
+            return None, f"I couldn't find a species called **{name_q}**. Available: {', '.join(SPECIES_DATA[k]['display_name'] for k in all_species)}."
+
+    # Fallback: try to fuzzy match the whole text as a species name with "add"
+    match = fuzzy_match(text)
+    if match:
+        display = SPECIES_DATA[match]['display_name']
+        if match in active_species:
+            return None, f"**{display}** is already visible on the plot."
+        return active_species + [match], f"Added **{display}** to the plot! 🔬"
+
+    return None, f"I'm not sure what to do with **{text}** — try something like 'add harbor seal', 'remove orca', or 'show only gray whale'."
+
+
+# --- Highlight search callback (UI search bar) ---
+@app.callback(
+    Output('highlight-store', 'data'),
+    [Input('highlight-search-btn', 'n_clicks'),
+     Input('highlight-clear-btn', 'n_clicks'),
+     Input('highlight-search-input', 'n_submit')],
+    [State('highlight-search-input', 'value'),
+     State('loaded-data', 'data'),
+     State('active-species-store', 'data')],
+    prevent_initial_call=True,
+)
+def ui_highlight_search(search_clicks, clear_clicks, n_submit, search_value, loaded_data, active_species):
+    if ctx.triggered_id == 'highlight-clear-btn':
+        return None
+    return _resolve_highlight_query(search_value, loaded_data, active_species)
+
+
 # --- Toggle species in active-species-store ---
 @app.callback(
     Output('active-species-store', 'data', allow_duplicate=True),
@@ -1795,9 +2399,10 @@ def update_toggle_styles(active_species):
      Input('opacity', 'value'),
      Input('loaded-data', 'data'),
      Input('protein-filter', 'value'),
-     Input('active-species-store', 'data')]
+     Input('active-species-store', 'data'),
+     Input('highlight-store', 'data')]
 )
-def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, active_species):
+def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, active_species, highlight_data):
     if not loaded_data:
         return go.Figure()
     active_species = active_species or []
@@ -1846,6 +2451,23 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
             hovertemplate='%{text}<extra></extra>',
             customdata=[[r['Entry']] for r in df_records]
         ))
+    # Highlight overlay — gold ring on top, transparent fill preserves species colors
+    if highlight_data and highlight_data.get('xs'):
+        fig.add_trace(go.Scattergl(
+            x=highlight_data['xs'],
+            y=highlight_data['ys'],
+            mode='markers',
+            name=f"⬤ {highlight_data.get('label', 'Highlighted')}",
+            marker=dict(
+                symbol='circle-open',
+                color='#FFD700',
+                size=point_size + 7,
+                line=dict(color='#FFD700', width=2.5)
+            ),
+            hoverinfo='skip',
+            showlegend=True,
+        ))
+
     margin = 50
     fig.update_layout(
         title=None,
@@ -1920,15 +2542,117 @@ def toggle_filter_enabled(active_species, current_filter):
         return {'opacity': 0.35, 'pointerEvents': 'none'}, 'all'
     return {}, current_filter
 
+def _render_table(rows, header_text, header_color='#64ffda'):
+    """Render the protein selection DataTable with a header."""
+    return html.Div([
+        html.Div(header_text,
+                style={'fontSize': 13, 'fontWeight': '600', 'marginBottom': 15,
+                      'color': header_color, 'fontFamily': '"JetBrains Mono", monospace',
+                      'letterSpacing': '1px'}),
+        dash_table.DataTable(
+            data=rows,
+            columns=[
+                {'name': 'Entry', 'id': 'Entry'},
+                {'name': 'Organism', 'id': 'Organism'},
+                {'name': 'Protein Name', 'id': 'Protein Name'},
+                {'name': 'Sequence', 'id': 'Sequence'},
+                {'name': 'Cluster', 'id': 'Cluster'},
+                {'name': 'Domains', 'id': 'Domains'},
+                {'name': 'HMM Descriptions', 'id': 'HMM Descriptions'},
+                {'name': 'Pfam IDs', 'id': 'Pfam IDs'},
+                {'name': 'Domain Ranges', 'id': 'Domain Ranges'},
+            ],
+            style_table={'overflowX': 'auto', 'borderRadius': '8px'},
+            style_cell={
+                'textAlign': 'left', 'padding': '12px 10px',
+                'fontFamily': '"JetBrains Mono", monospace', 'fontSize': 11,
+                'overflow': 'hidden', 'textOverflow': 'ellipsis',
+                'maxWidth': '180px', 'backgroundColor': 'transparent', 'border': 'none'
+            },
+            style_header={
+                'backgroundColor': 'rgba(100, 255, 218, 0.1)', 'fontWeight': '600',
+                'color': '#64ffda', 'borderBottom': '1px solid rgba(100, 255, 218, 0.2)',
+                'fontSize': 10, 'textTransform': 'uppercase', 'letterSpacing': '1px'
+            },
+            style_data={
+                'backgroundColor': 'rgba(10, 25, 47, 0.4)', 'color': '#f1faee',
+                'borderBottom': '1px solid rgba(100, 255, 218, 0.1)', 'cursor': 'pointer'
+            },
+            css=[
+                {'selector': 'td.dash-cell', 'rule': 'color: #f1faee !important;'},
+                {'selector': 'td.dash-cell.focused', 'rule': 'background-color: rgba(100, 255, 218, 0.15) !important; color: #f1faee !important; outline: none !important;'},
+                {'selector': 'input.dash-cell-value', 'rule': 'background-color: transparent !important; color: #f1faee !important; caret-color: transparent !important; border: none !important;'},
+                {'selector': 'tr:hover td', 'rule': 'color: #f1faee !important;'},
+                {'selector': '.dash-spreadsheet-inner tr:hover td::after, .dash-spreadsheet-inner td::after', 'rule': 'display: none !important;'},
+                {'selector': '.dash-spreadsheet-inner tr:hover', 'rule': 'background: none !important;'},
+            ],
+            style_data_conditional=[
+                {'if': {'row_index': 'odd'}, 'backgroundColor': 'rgba(10, 25, 47, 0.6)'},
+                {'if': {'state': 'active'}, 'backgroundColor': 'rgba(100, 255, 218, 0.15)',
+                 'color': '#f1faee', 'border': '1px solid rgba(100, 255, 218, 0.3)',
+                 'overflow': 'visible', 'whiteSpace': 'normal', 'height': 'auto'}
+            ],
+            editable=False, page_size=10, page_action='native',
+            sort_action='native', sort_by=[{'column_id': 'Protein Name', 'direction': 'asc'}]
+        )
+    ])
+
+
+def _build_protein_rows(entry_ids, loaded_data, active_species):
+    """Build table row dicts from a list of (species_name, entry_id) tuples."""
+    active_species = active_species or []
+    active_data = [sd for sd in loaded_data if sd['name'] in active_species]
+    species_lookup = {}
+    for sd in active_data:
+        species_lookup[sd['name']] = {rec['Entry']: rec for rec in sd['df']}
+
+    rows = []
+    for species_name, entry_id in entry_ids:
+        protein = species_lookup.get(species_name, {}).get(entry_id)
+        if not protein:
+            continue
+        ann = ANNOTATIONS.get(entry_id)
+        desc_raw = (ann.get('desc', '') if ann else '') or ''
+        protein_name = desc_raw.split(' OS=')[0].strip() if desc_raw else '—'
+        seq_raw = (ann.get('sequence', '') if ann else '') or ''
+        seq_preview = (seq_raw[:20] + '...') if len(seq_raw) > 20 else (seq_raw or '—')
+        display = SPECIES_DATA.get(species_name, {}).get('display_name', species_name)
+        rows.append({
+            'Entry': entry_id,
+            'Organism': display,
+            'Protein Name': protein_name[:80],
+            'Sequence': seq_preview,
+            'Cluster': str(protein.get('Cluster Label', 'N/A')),
+            'Domains': ann.get('hmm_labels', '') or '—' if ann else '—',
+            'HMM Descriptions': ann.get('hmm_descriptions', '') or '—' if ann else '—',
+            'Pfam IDs': ann.get('hmm_pfam_ids', '') or '—' if ann else '—',
+            'Domain Ranges': ann.get('hmm_ranges', '') or '—' if ann else '—',
+        })
+    return rows
+
+
 @app.callback(
     Output('selection-table-container', 'children'),
-    [Input('interactive-graph', 'selectedData')],
+    [Input('interactive-graph', 'selectedData'),
+     Input('highlight-store', 'data')],
     [State('loaded-data', 'data'),
      State('active-species-store', 'data')]
 )
-def show_selected_proteins(selectedData, loaded_data, active_species):
-    if not selectedData or not loaded_data:
+def show_selected_proteins(selectedData, highlight_data, loaded_data, active_species):
+    if not loaded_data:
         return "No proteins selected. Click or drag to select."
+
+    # Highlight search takes precedence when nothing is lassoed
+    if (not selectedData or not selectedData.get('points')) and highlight_data and highlight_data.get('entry_ids'):
+        rows = _build_protein_rows(highlight_data['entry_ids'], loaded_data, active_species)
+        label = highlight_data.get('label', 'Highlighted')
+        header_text = f"{len(rows)} protein{'s' if len(rows) != 1 else ''} — {label}"
+        header_color = '#FFD700'
+        return _render_table(rows, header_text, header_color)
+
+    if not selectedData or not selectedData.get('points'):
+        return "No proteins selected. Click or drag to select."
+
     try:
         active_species = active_species or []
         # Filter to active species (same order as graph traces)
@@ -1984,86 +2708,10 @@ def show_selected_proteins(selectedData, loaded_data, active_species):
                 'Pfam IDs': ann.get('hmm_pfam_ids', '') or '\u2014' if ann else '\u2014',
                 'Domain Ranges': ann.get('hmm_ranges', '') or '\u2014' if ann else '\u2014',
             })
-        return html.Div([
-            html.Div(f"{len(selected_proteins)} protein{'s' if len(selected_proteins) != 1 else ''} selected",
-                    style={'fontSize': 13, 'fontWeight': '600', 'marginBottom': 15,
-                          'color': '#64ffda', 'fontFamily': '"JetBrains Mono", monospace',
-                          'letterSpacing': '1px'}),
-            dash_table.DataTable(
-                data=selected_proteins,
-                columns=[
-                    {'name': 'Entry', 'id': 'Entry'},
-                    {'name': 'Organism', 'id': 'Organism'},
-                    {'name': 'Protein Name', 'id': 'Protein Name'},
-                    {'name': 'Sequence', 'id': 'Sequence'},
-                    {'name': 'Cluster', 'id': 'Cluster'},
-                    {'name': 'Domains', 'id': 'Domains'},
-                    {'name': 'HMM Descriptions', 'id': 'HMM Descriptions'},
-                    {'name': 'Pfam IDs', 'id': 'Pfam IDs'},
-                    {'name': 'Domain Ranges', 'id': 'Domain Ranges'},
-                ],
-                style_table={'overflowX': 'auto', 'borderRadius': '8px'},
-                style_cell={
-                    'textAlign': 'left',
-                    'padding': '12px 10px',
-                    'fontFamily': '"JetBrains Mono", monospace',
-                    'fontSize': 11,
-                    'overflow': 'hidden',
-                    'textOverflow': 'ellipsis',
-                    'maxWidth': '180px',
-                    'backgroundColor': 'transparent',
-                    'border': 'none'
-                },
-                style_header={
-                    'backgroundColor': 'rgba(100, 255, 218, 0.1)',
-                    'fontWeight': '600',
-                    'color': '#64ffda',
-                    'borderBottom': '1px solid rgba(100, 255, 218, 0.2)',
-                    'fontSize': 10,
-                    'textTransform': 'uppercase',
-                    'letterSpacing': '1px'
-                },
-                style_data={
-                    'backgroundColor': 'rgba(10, 25, 47, 0.4)',
-                    'color': '#f1faee',
-                    'borderBottom': '1px solid rgba(100, 255, 218, 0.1)',
-                    'cursor': 'pointer'
-                },
-                css=[{
-                    'selector': 'td.dash-cell',
-                    'rule': 'color: #f1faee !important;'
-                }, {
-                    'selector': 'td.dash-cell.focused',
-                    'rule': 'background-color: rgba(100, 255, 218, 0.15) !important; color: #f1faee !important; outline: none !important;'
-                }, {
-                    'selector': 'input.dash-cell-value',
-                    'rule': 'background-color: transparent !important; color: #f1faee !important; caret-color: transparent !important; border: none !important;'
-                }, {
-                    'selector': 'tr:hover td',
-                    'rule': 'color: #f1faee !important;'
-                }, {
-                    'selector': '.dash-spreadsheet-inner tr:hover td::after, .dash-spreadsheet-inner td::after',
-                    'rule': 'display: none !important;'
-                }, {
-                    'selector': '.dash-spreadsheet-inner tr:hover',
-                    'rule': 'background: none !important;'
-                }],
-                style_data_conditional=[
-                    {'if': {'row_index': 'odd'}, 'backgroundColor': 'rgba(10, 25, 47, 0.6)'},
-                    {'if': {'state': 'active'}, 'backgroundColor': 'rgba(100, 255, 218, 0.15)',
-                     'color': '#f1faee',
-                     'border': '1px solid rgba(100, 255, 218, 0.3)',
-                     'overflow': 'visible',
-                     'whiteSpace': 'normal',
-                     'height': 'auto'}
-                ],
-                editable=False,
-                page_size=10,
-                page_action='native',
-                sort_action='native',
-                sort_by=[{'column_id': 'Protein Name', 'direction': 'asc'}]
-            )
-        ])
+        return _render_table(
+            selected_proteins,
+            f"{len(selected_proteins)} protein{'s' if len(selected_proteins) != 1 else ''} selected"
+        )
     except Exception as e:
         return html.Div(f"Error loading selection: {str(e)}",
                        style={'padding': 15, 'color': '#e63946',
@@ -2071,6 +2719,8 @@ def show_selected_proteins(selectedData, loaded_data, active_species):
                              'backgroundColor': 'rgba(230, 57, 70, 0.1)',
                              'borderRadius': 8,
                              'border': '1px solid rgba(230, 57, 70, 0.3)'})
+
+
 
 @app.callback(
     [Output('selection-screen', 'style', allow_duplicate=True),
@@ -2092,6 +2742,145 @@ def go_back(n_clicks):
                 {'textAlign': 'center', 'padding': '120px 20px'},
                 {'display': 'none'})
     raise dash.exceptions.PreventUpdate
+
+# ============= DISCOVERY CALLBACKS =============
+
+app.clientside_callback(
+    """
+    function(n_clicks) {
+        if (n_clicks > 0) {
+            var btn = document.getElementById('discover-btn');
+            if (btn) {
+                btn.textContent = '⏳ Analyzing...';
+                btn.disabled = true;
+                btn.style.opacity = '0.6';
+            }
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('discover-btn', 'children', allow_duplicate=True),
+    Input('discover-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+
+@app.callback(
+    [Output('chat-messages-display', 'children', allow_duplicate=True),
+     Output('chat-history', 'data', allow_duplicate=True),
+     Output('discoveries-store', 'data'),
+     Output('discover-btn', 'children'),
+     Output('discover-btn', 'disabled'),
+     Output('discover-status', 'children')],
+    Input('discover-btn', 'n_clicks'),
+    [State('loaded-data', 'data'),
+     State('active-species-store', 'data'),
+     State('chat-messages-display', 'children'),
+     State('chat-history', 'data')],
+    prevent_initial_call=True,
+)
+def run_discovery(n_clicks, loaded_data, active_species, current_msgs, chat_history):
+    chat_history = chat_history or []
+    current_msgs = current_msgs or []
+
+    BTN_READY = '✨ Discover'
+    USER_PROMPT = "✨ Analyze my proteome data and find the most interesting clusters!"
+
+    def _done(msgs, history, store=dash.no_update):
+        """Return all 6 outputs, resetting the button."""
+        return msgs, history, store, BTN_READY, False, ""
+
+    # Add the user-side message so it looks like a conversation
+    user_div = html.Div(USER_PROMPT, className='chat-msg chat-msg-user')
+    chat_history.append({"role": "user", "content": USER_PROMPT})
+    current_msgs = current_msgs + [user_div]
+
+    def _error_msg(text):
+        div = html.Div(dcc.Markdown(text, className='chat-md'), className='chat-msg chat-msg-assistant')
+        chat_history.append({"role": "assistant", "content": text})
+        return _done(current_msgs + [div], chat_history)
+
+    if not loaded_data or not active_species:
+        return _error_msg("Load a proteome and select at least one species before running discovery! 🐬")
+
+    discovery_context = build_discovery_context(active_species, loaded_data)
+    if not discovery_context:
+        return _error_msg("Couldn't build a cluster summary — make sure species data is fully loaded.")
+
+    print(f"[run_discovery] context length: {len(discovery_context)} chars, calling GPT...")
+    insights = discover_insights(discovery_context)
+    if not insights:
+        return _error_msg("The discovery analysis didn't return results — the AI may have had trouble parsing the cluster data. Try again or select more species!")
+
+    # Intro message
+    intro_text = "Here are some interesting patterns I spotted in your proteome data! 🔬 Click **Show me** to highlight any cluster on the plot."
+    intro_div = html.Div(
+        dcc.Markdown(intro_text, className='chat-md'),
+        className='chat-msg chat-msg-assistant'
+    )
+    chat_history.append({"role": "assistant", "content": intro_text})
+
+    discovery_divs = []
+    for ins in insights:
+        cluster_id = ins.get('cluster', '')
+        emoji = ins.get('emoji', '🔬')
+        title = ins.get('title', f'Cluster {cluster_id}')
+        desc = ins.get('description', '')
+        search_term = str(ins.get('search_term', cluster_id))
+
+        card_text = f"**{emoji} {title}** *(Cluster {cluster_id})*\n\n{desc}"
+        chat_history.append({"role": "assistant", "content": card_text})
+
+        discovery_divs.append(html.Div([
+            dcc.Markdown(card_text, className='chat-md'),
+            html.Button(
+                '📍 Show me',
+                id={'type': 'show-me-btn', 'index': search_term},
+                n_clicks=0,
+                style={
+                    'marginTop': 8, 'padding': '4px 12px',
+                    'background': 'linear-gradient(135deg, rgba(100,255,218,0.2), rgba(69,123,157,0.2))',
+                    'border': '1px solid rgba(100,255,218,0.4)', 'borderRadius': 6,
+                    'color': '#64ffda', 'fontSize': 11, 'cursor': 'pointer',
+                    'fontFamily': '"Inter", sans-serif', 'fontWeight': '600',
+                }
+            ),
+        ], className='chat-msg chat-msg-assistant'))
+
+    new_msgs = current_msgs + [intro_div] + discovery_divs
+    return _done(new_msgs, chat_history, insights)
+
+
+app.clientside_callback(
+    """
+    function(n_clicks_list) {
+        if (!n_clicks_list || !n_clicks_list.some(Boolean))
+            return window.dash_clientside.no_update;
+        return n_clicks_list.map(function(n, i) {
+            return (n && n > 0) ? '⏳ Highlighting...' : '📍 Show me';
+        });
+    }
+    """,
+    Output({'type': 'show-me-btn', 'index': ALL}, 'children', allow_duplicate=True),
+    Input({'type': 'show-me-btn', 'index': ALL}, 'n_clicks'),
+    prevent_initial_call=True,
+)
+
+@app.callback(
+    [Output('highlight-store', 'data', allow_duplicate=True),
+     Output({'type': 'show-me-btn', 'index': ALL}, 'children')],
+    Input({'type': 'show-me-btn', 'index': ALL}, 'n_clicks'),
+    [State('loaded-data', 'data'),
+     State('active-species-store', 'data')],
+    prevent_initial_call=True,
+)
+def show_me_discovery(n_clicks_list, loaded_data, active_species):
+    if not any(n_clicks_list):
+        raise dash.exceptions.PreventUpdate
+    search_term = ctx.triggered_id['index']
+    result = _resolve_highlight_query(search_term, loaded_data, active_species)
+    reset_labels = ['📍 Show me'] * len(n_clicks_list)
+    return result, reset_labels
+
 
 # ============= CHAT CALLBACKS =============
 
@@ -2153,35 +2942,130 @@ app.clientside_callback(
 )
 
 
-# Server callback: process query when pending-query is set
 @app.callback(
     [Output('chat-messages-display', 'children'),
-     Output('chat-history', 'data')],
+     Output('chat-history', 'data'),
+     Output('highlight-store', 'data', allow_duplicate=True),
+     Output('active-species-store', 'data', allow_duplicate=True),
+     Output('protein-filter', 'value', allow_duplicate=True),
+     Output('point-size', 'value', allow_duplicate=True),
+     Output('opacity', 'value', allow_duplicate=True)],
     Input('pending-query', 'data'),
     [State('chat-history', 'data'),
      State('active-species-store', 'data'),
      State('interactive-graph', 'selectedData'),
-     State('loaded-data', 'data')],
+     State('loaded-data', 'data'),
+     State('highlight-store', 'data'),
+     State('point-size', 'value'),
+     State('opacity', 'value')],
     prevent_initial_call=True,
 )
-def process_chat_query(pending_query, chat_history, active_species, selected_data, loaded_data):
+def process_chat_query(pending_query, chat_history, active_species, selected_data, loaded_data, highlight_store, current_size, current_opacity):
     if not pending_query:
         raise dash.exceptions.PreventUpdate
 
     chat_history = chat_history or []
     visual_context = build_visual_context(active_species, selected_data, loaded_data)
 
+    if highlight_store and highlight_store.get('entry_ids'):
+        label = highlight_store.get('label', 'Highlighted')
+        rows = _build_protein_rows(highlight_store['entry_ids'], loaded_data, active_species)
+        if rows:
+            lines = [f"Currently highlighted on plot: {label} ({len(rows)} proteins)"]
+            for r in rows[:20]:
+                lines.append(
+                    f"  - {r['Entry']} ({r['Organism']}): {r['Protein Name']}, "
+                    f"Cluster: {r['Cluster']}, Domains: {r.get('Domains', '—')}"
+                )
+            if len(rows) > 20:
+                lines.append(f"  ... and {len(rows) - 20} more")
+            visual_context = (visual_context + "\n\n" if visual_context else "") + "\n".join(lines)
+
+    if loaded_data:
+        dataset_ctx = _dataset_lookup_context(pending_query, loaded_data, active_species)
+        if dataset_ctx:
+            visual_context = (visual_context + "\n\n" if visual_context else "") + dataset_ctx
+
+    new_highlight = dash.no_update
+    new_active_species = dash.no_update
+    new_filter = dash.no_update
+    new_size = dash.no_update
+    new_opacity = dash.no_update
     mode, text = route_message(chat_history, pending_query, visual_context)
-    if mode == "rag":
-        raw = query_rag(text)
-        if raw.startswith("Error:") or raw.startswith("The knowledge base service"):
-            # RAG unavailable — fall back to answering from visual context or chat
-            if visual_context:
-                answer = answer_with_context(text, visual_context, chat_history)
-            else:
-                answer = chat_reply(pending_query, chat_history, visual_context)
+
+    def _render(history):
+        return [
+            html.Div(m['content'], className='chat-msg chat-msg-user') if m['role'] == 'user'
+            else html.Div(dcc.Markdown(m['content'], className='chat-md'), className='chat-msg chat-msg-assistant')
+            for m in history
+        ]
+
+    if mode == "control":
+        new_filter, new_size, new_opacity, answer = _resolve_ui_command(text, current_size, current_opacity)
+        chat_history.append({"role": "user", "content": pending_query})
+        chat_history.append({"role": "assistant", "content": answer})
+        return _render(chat_history), chat_history, new_highlight, new_active_species, new_filter, new_size, new_opacity
+
+    if mode == "species":
+        new_list, answer = _resolve_species_command(text, active_species)
+        if new_list is not None:
+            new_active_species = new_list
+        chat_history.append({"role": "user", "content": pending_query})
+        chat_history.append({"role": "assistant", "content": answer})
+        return _render(chat_history), chat_history, new_highlight, new_active_species, new_filter, new_size, new_opacity
+
+    if mode == "discover":
+        disc_context = build_discovery_context(active_species, loaded_data)
+        insights = discover_insights(disc_context) if disc_context else []
+        if insights:
+            intro = "Here are some interesting patterns I spotted in your proteome data! 🔬 Click **Show me** to highlight any cluster on the plot."
+            chat_history.append({"role": "user", "content": pending_query})
+            chat_history.append({"role": "assistant", "content": intro})
+            message_divs = _render(chat_history)
+            for ins in insights:
+                card_text = f"**{ins.get('emoji','🔬')} {ins.get('title','')}** *(Cluster {ins.get('cluster','')})*\n\n{ins.get('description','')}"
+                chat_history.append({"role": "assistant", "content": card_text})
+                message_divs.append(html.Div([
+                    dcc.Markdown(card_text, className='chat-md'),
+                    html.Button('📍 Show me',
+                        id={'type': 'show-me-btn', 'index': str(ins.get('search_term', ins.get('cluster', '')))},
+                        n_clicks=0, style={
+                            'marginTop': 8, 'padding': '4px 12px',
+                            'background': 'linear-gradient(135deg, rgba(100,255,218,0.2), rgba(69,123,157,0.2))',
+                            'border': '1px solid rgba(100,255,218,0.4)', 'borderRadius': 6,
+                            'color': '#64ffda', 'fontSize': 11, 'cursor': 'pointer',
+                            'fontFamily': '"Inter", sans-serif', 'fontWeight': '600'})
+                ], className='chat-msg chat-msg-assistant'))
+            return message_divs, chat_history, new_highlight, new_active_species, new_filter, new_size, new_opacity
+        else:
+            answer = "I couldn't find clear patterns right now — try selecting more species or reloading the data."
+            chat_history.append({"role": "user", "content": pending_query})
+            chat_history.append({"role": "assistant", "content": answer})
+            return _render(chat_history), chat_history, new_highlight, new_active_species, new_filter, new_size, new_opacity
+
+    elif mode == "highlight":
+        highlight_data = _resolve_highlight_query(text, loaded_data, active_species)
+        new_highlight = highlight_data
+        if highlight_data:
+            count = len(highlight_data['xs'])
+            answer = (
+                f"I've highlighted **{highlight_data['label']}** on the plot — "
+                f"{count} protein{'s' if count != 1 else ''} marked with gold rings. 🎯"
+            )
+        else:
+            answer = (
+                f"I couldn't find **{text}** in the currently loaded data. "
+                "Make sure the species containing that cluster or protein is active, "
+                "or try the search bar."
+            )
+    elif mode == "rag":
+        raw, sources_block = query_rag(text, visual_context)
+        if raw.startswith("Error:"):
+            answer = answer_with_context(text, visual_context, chat_history) if visual_context else chat_reply(pending_query, chat_history, visual_context)
         else:
             answer = rewrite_as_guide(raw, pending_query, chat_history, visual_context)
+            if sources_block:
+                answer = answer + "\n\n" + sources_block
     elif mode == "visual":
         answer = answer_with_context(text, visual_context, chat_history)
     else:
@@ -2189,18 +3073,7 @@ def process_chat_query(pending_query, chat_history, active_species, selected_dat
 
     chat_history.append({"role": "user", "content": pending_query})
     chat_history.append({"role": "assistant", "content": answer})
-
-    message_divs = []
-    for msg in chat_history:
-        if msg['role'] == 'user':
-            message_divs.append(html.Div(msg['content'], className='chat-msg chat-msg-user'))
-        else:
-            message_divs.append(html.Div(
-                dcc.Markdown(msg['content'], className='chat-md'),
-                className='chat-msg chat-msg-assistant'
-            ))
-
-    return message_divs, chat_history
+    return _render(chat_history), chat_history, new_highlight, new_active_species, new_filter, new_size, new_opacity
 
 
 server = app.server
