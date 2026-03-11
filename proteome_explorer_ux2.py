@@ -1218,11 +1218,11 @@ app.layout = html.Div([
                        style={'textAlign': 'center', 'marginBottom': 8,
                              'fontFamily': '"Inter", sans-serif', 'fontWeight': '300',
                              'fontSize': 48, 'letterSpacing': '2px'}),
-                html.P("Comparative Proteomics Visualization System",
+                html.P("AI-Powered Proteomics Exploration",
                        style={'textAlign': 'center', 'color': '#64ffda', 'fontSize': 13,
                              'marginBottom': 8, 'fontFamily': '"JetBrains Mono", monospace',
                              'letterSpacing': '3px', 'textTransform': 'uppercase'}),
-                html.P("Select species for multi-dimensional protein space analysis",
+                html.P("Select species to explore their proteomes, guided by an AI agent that explains what you see",
                        style={'textAlign': 'center', 'color': '#a8dadc', 'fontSize': 16,
                              'marginBottom': 60, 'fontFamily': '"Inter", sans-serif',
                              'fontWeight': '300'}),
@@ -1532,10 +1532,10 @@ app.layout = html.Div([
     dcc.Store(id='discoveries-store', data=None),
 
     # Chat widget - floating toggle + panel
-    html.Button('AI', id='chat-toggle-btn', n_clicks=0, className='chat-toggle'),
+    html.Button('Ask AI', id='chat-toggle-btn', n_clicks=0, className='chat-toggle'),
     html.Div([
         html.Div([
-            html.Span("Your Lab Guide", style={'flex': '1'}),
+            html.Span("AI Agent", style={'flex': '1'}),
             dcc.Loading(
                 html.Div(id='discover-status'),
                 type='circle',

@@ -6,7 +6,7 @@ Proteomics data is largely inaccessible to anyone outside a narrow research comm
 
 This project was developed in the Jinich Lab at UCSD.
 
-
+<img width="1918" height="931" alt="image" src="https://github.com/user-attachments/assets/10c72f21-ac97-4ea3-a92f-9fecb8646f46" />
 
 ---
 
@@ -58,6 +58,8 @@ The agent is the primary interface for the portal. Every message goes through a 
 **Visual** ("What am I looking at?", "What does this cluster mean?"), the agent assembles a real-time description of the current screen state and uses that as context. This includes a spatial overview of the UMAP divided into a 3x3 grid with protein counts per species per region, a summary of the top 30 clusters labelled as unique or shared across species, and when the user has made a lasso selection, the top 10 Pfam/HMM domains, a cluster breakdown, and 5 representative protein entries. The agent always knows what the user is looking at without any manual input.
 
 **Biology** ("Why do dolphins and orcas share so many clusters?", "What does this domain do?"), the full RAG pipeline runs. The agent retrieves the most relevant chunks from the knowledge base, generates a grounded answer, reformulates it into plain language, and appends follow-up suggestions. If retrieved chunks are not relevant enough, the model falls back on general marine biology knowledge and flags the response accordingly.
+
+<img width="1916" height="933" alt="image" src="https://github.com/user-attachments/assets/e46c5581-603b-4e42-99c0-b22585ac3fb1" />
 
 ---
 
