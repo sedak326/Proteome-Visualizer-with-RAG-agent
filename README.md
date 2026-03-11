@@ -4,7 +4,7 @@ Proteomics data is largely inaccessible to anyone outside a narrow research comm
 
 This project was developed in the Jinich Lab at UCSD.
 
-![Demo](prerendered_animations/all_animals.gif)
+
 
 ---
 
@@ -64,6 +64,8 @@ The agent is the primary interface for the portal. Every message goes through a 
 Each protein was embedded using ProtT5-XL, a transformer-based protein language model pretrained on UniRef50, producing vectors that capture structural, functional, and evolutionary properties. These embeddings were reduced to 2D using UMAP.
 
 All five species were projected into a single shared UMAP so spatial relationships are meaningful: overlap reflects real similarity in embedding space. K-means clustering was applied to the combined dataset to identify protein groups that are unique to one species or shared across multiple. Each protein was annotated using SeqHub, which assigns Pfam/HMM domain labels and functional descriptions used in hover labels, cluster summaries, and the agent's visual context.
+
+![Demo](prerendered_animations/all_animals.gif)
 
 ---
 
