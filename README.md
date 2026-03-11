@@ -6,8 +6,6 @@ Proteomics data is largely inaccessible to anyone outside a narrow research comm
 
 This project was developed in the Jinich Lab at UCSD.
 
-<img width="1918" height="931" alt="image" src="https://github.com/user-attachments/assets/10c72f21-ac97-4ea3-a92f-9fecb8646f46" />
-
 ---
 
 ## How to Use It
