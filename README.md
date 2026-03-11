@@ -1,8 +1,6 @@
-# PLVis, Marine Mammals & RAG Agent
+# Proteome Visualizer with AI Agent
 
-Proteomics data carries a lot of information about population health, ecological roles, and evolutionary history of species, but it is effectively inaccessible to anyone outside a narrow research community. Even specialists in adjacent fields often lack the training to interpret these findings, and the gap between what the data shows and what a non-specialist can actually understand is large.
-
-To close that gap, we built PLVis, an interactive portal that visualizes the proteomes of five Southern California marine mammal species and integrates an AI agent that guides users through what they are seeing. The agent is always present, aware of the current screen state, and able to explain the visualization, answer biology questions grounded in scientific literature, and suggest what to explore next.
+Proteomics data is largely inaccessible to anyone outside a narrow research community, even though it carries rich information about species health, ecology, and evolution. We built this portal to close that gap: it visualizes the proteomes of five Southern California marine mammal species and puts an AI agent in charge of guiding users through what they are seeing.
 
 This project was developed in the Jinich Lab at UCSD.
 
@@ -51,30 +49,21 @@ Once the app is running, select one or more species from the top bar to load the
 
 ## The AI Agent
 
-The agent is the primary way users interact with the portal. Every message is first passed to a router that classifies it and decides which tool to call.
+The agent is the primary interface for the portal. Every message goes through a router LLM that classifies it and decides which tool to call. This keeps the pipeline efficient: simple conversational messages never touch the RAG system, visual questions get answered from live screen state, and biology questions trigger full retrieval.
 
-**Conversational** ("Hi", "Thanks", "That's interesting"), the RAG pipeline is skipped and the model replies directly.
+**Conversational** ("Hi", "Thanks"), the model replies directly without any retrieval.
 
-**Visual** ("What am I looking at?", "What does this cluster mean?", "Explain the top-left region"), no retrieval is performed. Instead the agent assembles a real-time description of the current screen state and uses that as context. This visual context has up to three components:
-- A spatial overview: the UMAP canvas divided into a 3x3 grid with protein counts per species per region and any areas of cross-species overlap
-- A cluster summary: the top 30 clusters ranked by size, each labelled as unique to one species or shared across multiple, with representative protein names
-- A selection summary (only when the user has lassoed proteins): the top 10 Pfam/HMM domains across the selection, a cluster breakdown, and 5 representative protein entries with UniProt IDs and UMAP coordinates
+**Visual** ("What am I looking at?", "What does this cluster mean?"), the agent assembles a real-time description of the current screen state and uses that as context. This includes a spatial overview of the UMAP divided into a 3x3 grid with protein counts per species per region, a summary of the top 30 clusters labelled as unique or shared across species, and when the user has made a lasso selection, the top 10 Pfam/HMM domains, a cluster breakdown, and 5 representative protein entries. The agent always knows what the user is looking at without any manual input.
 
-This means the agent always knows exactly what the user is currently looking at, without any manual input from the user.
-
-**Biology** ("Why do dolphins and orcas share so many clusters?", "What does this domain do?", "How do killer whale proteomes compare to harbor seals?"), the full RAG pipeline runs. The agent retrieves the most relevant chunks from the curated knowledge base, generates a grounded answer, and then reformulates it into plain language. Follow-up suggestions are appended automatically.
-
-If retrieved chunks are not sufficiently relevant, the model falls back on general marine biology knowledge and flags the response as not sourced from the indexed literature, so the system degrades gracefully rather than returning confidently wrong answers.
+**Biology** ("Why do dolphins and orcas share so many clusters?", "What does this domain do?"), the full RAG pipeline runs. The agent retrieves the most relevant chunks from the knowledge base, generates a grounded answer, reformulates it into plain language, and appends follow-up suggestions. If retrieved chunks are not relevant enough, the model falls back on general marine biology knowledge and flags the response accordingly.
 
 ---
 
 ## UMAP Visualization
 
-Each protein was embedded using ProtT5-XL, a transformer-based protein language model pretrained on UniRef50, which produces fixed-length vectors capturing structural, functional, and evolutionary properties. These high-dimensional embeddings were reduced to 2D using UMAP.
+Each protein was embedded using ProtT5-XL, a transformer-based protein language model pretrained on UniRef50, producing vectors that capture structural, functional, and evolutionary properties. These embeddings were reduced to 2D using UMAP.
 
-All five species were projected into a single shared UMAP so that spatial relationships between species are meaningful: overlap in the plot reflects real similarity in the underlying embedding space. K-means clustering was then applied to the combined dataset to identify protein groups that are unique to one species or shared across multiple.
-
-Each protein was annotated using SeqHub, which assigns Pfam/HMM domain labels and functional descriptions. These annotations power the hover labels, cluster descriptions, and the agent's visual context assembly.
+All five species were projected into a single shared UMAP so spatial relationships are meaningful: overlap reflects real similarity in embedding space. K-means clustering was applied to the combined dataset to identify protein groups that are unique to one species or shared across multiple. Each protein was annotated using SeqHub, which assigns Pfam/HMM domain labels and functional descriptions used in hover labels, cluster summaries, and the agent's visual context.
 
 ---
 
@@ -98,17 +87,15 @@ The agent was evaluated against GPT-4o mini as a base model using 200 QA pairs g
 | Recall@8 | 0.855 |
 | MRR | 0.60 |
 
-The correct chunk was present in the top 8 results for 85.5% of queries.
-
 **Generation**
 
 | Metric | RAG | Base (GPT-4o mini) |
 |---|---|---|
 | SemScore | 0.818 | 0.714 |
 | BERTScore | 0.926 | 0.895 |
-| SemScore Win Rate | 81.5% | , |
-| BERTScore Win Rate | 73% | , |
-| Faithfulness | 0.866 | , |
+| SemScore Win Rate | 81.5% | n/a |
+| BERTScore Win Rate | 73% | n/a |
+| Faithfulness | 0.866 | n/a |
 | Latency (s) | 3.43 | 2.19 |
 
 The RAG agent outperformed the base model on 81.5% of questions by SemScore and 73% by BERTScore. Faithfulness of 0.866 indicates that the large majority of responses stayed grounded in the retrieved context.
@@ -123,4 +110,4 @@ Dash + Plotly (web UI and scatter plot), ChromaDB (vector database), LangChain (
 
 ## What's Next
 
-The agent already meaningfully outperforms the base model on answer quality and factual grounding. The main area to improve is retrieval precision: Recall@1 of 0.42 means the single most relevant chunk often is not ranked first, even when it is present in the top 8. Next steps focus on enhancing agent performance through better retrieval strategies, reranking, and further prompt refinement to push faithfulness and generation quality higher.
+The agent already meaningfully outperforms the base model on answer quality and factual grounding. The main area to improve is retrieval precision: Recall@1 of 0.42 means the most relevant chunk is often not ranked first even when it is present in the top 8. Next steps focus on enhancing agent performance through better retrieval strategies, reranking, and further prompt refinement.
