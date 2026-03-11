@@ -2,6 +2,8 @@
 
 Proteomics data is largely inaccessible to anyone outside a narrow research community, even though it carries rich information about species health, ecology, and evolution. We built this portal to close that gap: it visualizes the proteomes of five Southern California marine mammal species and puts an AI agent in charge of guiding users through what they are seeing.
 
+<img width="1918" height="931" alt="image" src="https://github.com/user-attachments/assets/10c72f21-ac97-4ea3-a92f-9fecb8646f46" />
+
 This project was developed in the Jinich Lab at UCSD.
 
 
