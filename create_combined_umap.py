@@ -7,7 +7,7 @@ import numpy as np
 import h5py
 from pathlib import Path
 import umap
-from sklearn.cluster import KMeans
+from sklearn.cluster import HDBSCAN
 from Bio import SeqIO
 import re
 
@@ -117,40 +117,34 @@ def main():
     organisms = [
         {
             'h5': Path('h5py_files/bottlenose.h5'),
-            'fasta': Path('fastafiles/bottlenose.fasta'),
+            'fasta': Path('fastafiles/no_isoforms/bottlenose.fasta'),
             'name': 'Tursiops truncatus',
             'short_name': 'Bottlenose Dolphin'
         },
         {
             'h5': Path('h5py_files/graywhale.h5'),
-            'fasta': Path('fastafiles/graywhale.faa'),
+            'fasta': Path('fastafiles/no_isoforms/graywhale.faa'),
             'name': 'Eschrichtius robustus',
             'short_name': 'Graywhale'
         },
         {
             'h5': Path('h5py_files/harborseal.h5'),
-            'fasta': Path('fastafiles/harborseal.faa'),
+            'fasta': Path('fastafiles/no_isoforms/harborseal.faa'),
             'name': 'Phoca vitulina',
             'short_name': 'Harborseal'
         },
         {
             'h5': Path('h5py_files/orca.h5'),
-            'fasta': Path('fastafiles/orca.faa'),
+            'fasta': Path('fastafiles/no_isoforms/orca.faa'),
             'name': 'Orcinus orca',
             'short_name': 'Killer whale'
         },
         {
             'h5': Path('h5py_files/sealion.h5'),
-            'fasta': Path('fastafiles/sealion.fasta'),
+            'fasta': Path('fastafiles/no_isoforms/sealion.fasta'),
             'name': 'Zalophus californianus',
             'short_name': 'California Sealion'
         },
-        {
-            'h5': Path('h5py_files/cobra.h5'),
-            'fasta': Path('fastafiles/cobra.fasta'),
-            'name': 'Ophiophagus hannah',
-            'short_name': 'King Cobra'
-        }
     ]
 
     # Step 1: Load all organism data
@@ -206,18 +200,17 @@ def main():
     print(f"UMAP 2 range: [{embedding_2d[:, 1].min():.2f}, {embedding_2d[:, 1].max():.2f}]", flush=True)
     print(flush=True)
 
-    # Step 3: Perform clustering on combined data
+    # Step 3: Cluster on 2D UMAP coordinates so clusters match visible blobs
     print("STEP 3: Clustering combined dataset...", flush=True)
     print("-" * 60, flush=True)
+    print("Using HDBSCAN on UMAP 2D coordinates (clusters will match visual groups)", flush=True)
 
-    n_clusters = min(100, len(all_metadata) // 50)
-    if n_clusters < 2:
-        n_clusters = 2
+    hdbscan = HDBSCAN(min_cluster_size=150, min_samples=15)
+    cluster_labels = hdbscan.fit_predict(embedding_2d)
 
-    print(f"Using {n_clusters} clusters", flush=True)
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    cluster_labels = kmeans.fit_predict(embeddings_array)
-    print(f"Clustering complete!\n", flush=True)
+    n_clusters_found = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+    n_noise = (cluster_labels == -1).sum()
+    print(f"Clustering complete! Found {n_clusters_found} clusters, {n_noise} unclustered points (label=-1)\n", flush=True)
 
     # Step 4: Create and save individual organism files
     print("STEP 4: Saving individual organism files...", flush=True)

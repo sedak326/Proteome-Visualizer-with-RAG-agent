@@ -11,7 +11,7 @@ from itertools import combinations
 from pathlib import Path
 
 # All available species
-SPECIES = ['sealion', 'bottlenose', 'graywhale', 'orca', 'harborseal', 'cobra']
+SPECIES = ['sealion', 'bottlenose', 'graywhale', 'orca', 'harborseal']
 
 def generate_all_animations():
     """Generate all non-empty subset combinations (singles through all-six)"""

@@ -92,6 +92,8 @@ def rag_retrieve(question: str) -> tuple[str, list[str], list[str]]:
     retrieved_ids = result["ids"][0] if result["ids"] else []
     docs = result["documents"][0] if result["documents"] else []
     context = "\n\n---\n\n".join(docs) if docs else ""
+    # Strip null bytes and control characters that break JSON serialisation
+    context = "".join(c for c in context if c >= " " or c in "\n\t")
 
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -279,7 +281,6 @@ def run_evaluation() -> None:
         "rag_grounded_rate":  results_df["rag_grounded"].mean(),
         "rag_delta_mean":     (results_df["rag_sem_score"] - results_df["base_sem_score"]).mean(),
         "recall_at_1_mean":    results_df["recall_at_1"].mean(),
-        "recall_at_3_mean":    results_df["recall_at_3"].mean(),
         "recall_at_8_mean":    results_df["recall_at_8"].mean(),
         "mrr_mean":            results_df["mrr"].mean(),
         "rag_latency_mean_s":  results_df["rag_latency_s"].mean(),
@@ -298,7 +299,7 @@ def run_evaluation() -> None:
     print(f"  RAG win rate        : {summary['rag_win_rate']:.1%}")
     print(f"  RAG grounded rate   : {summary['rag_grounded_rate']:.1%}")
     print("\n── Retrieval ────────────────────────────────────")
-    print(f"  Recall@1            : {summary['recall_at_1_mean']:.4f}")ho
+    print(f"  Recall@1            : {summary['recall_at_1_mean']:.4f}")
     print(f"  Recall@8            : {summary['recall_at_8_mean']:.4f}")
     print(f"  MRR                 : {summary['mrr_mean']:.4f}")
     if AUTORAG_AVAILABLE:
