@@ -1532,6 +1532,7 @@ app.layout = html.Div([
     dcc.Interval(id='fade-complete-timer', interval=800, disabled=True, n_intervals=0, max_intervals=1),
     dcc.Store(id='animation-path-store', data=None),
     dcc.Store(id='highlight-store', data=None),
+    dcc.Store(id='last-click-store', data=None),
     dcc.Store(id='selected-cluster-store', data=None),
 
     # Chat widget - floating toggle + panel
@@ -2666,26 +2667,41 @@ def ui_highlight_search(search_clicks, clear_clicks, n_submit, search_value, loa
     return {'xs': merged_xs, 'ys': merged_ys, 'entry_ids': merged_ids, 'label': search_value}
 
 
-# --- Highlight protein when row is clicked in the protein table ---
+# --- Highlight protein when row is double-clicked in the protein table ---
+# Single click expands the row via CSS (state: active) without changing the UMAP.
+# Double click (clicking the same row twice) updates highlight-store.
 @app.callback(
+    Output('last-click-store', 'data'),
     Output('highlight-store', 'data', allow_duplicate=True),
     Input('protein-datatable', 'active_cell'),
     [State('protein-datatable', 'data'),
      State('loaded-data', 'data'),
-     State('active-species-store', 'data')],
+     State('active-species-store', 'data'),
+     State('last-click-store', 'data')],
     prevent_initial_call=True,
 )
-def table_row_highlight(active_cell, table_data, loaded_data, active_species):
+def table_row_click(active_cell, table_data, loaded_data, active_species, last_click):
     if not active_cell or not table_data:
         raise dash.exceptions.PreventUpdate
-    row = table_data[active_cell['row']]
-    protein_name = row.get('Protein Name', '')
+    row_idx = active_cell['row']
+    row = table_data[row_idx]
     entry_id = row.get('Entry', '')
-    # Try entry ID first (exact), fall back to protein name search
-    result = _resolve_highlight_query(entry_id, loaded_data, active_species)
-    if not result or not result.get('entry_ids'):
-        result = _resolve_highlight_query(protein_name, loaded_data, active_species)
-    return result
+    is_double = (
+        last_click is not None and
+        last_click.get('row') == row_idx and
+        last_click.get('entry') == entry_id
+    )
+    if is_double:
+        # Double click: highlight in UMAP and reset so the next single click on
+        # the same row doesn't re-trigger.
+        result = _resolve_highlight_query(entry_id, loaded_data, active_species)
+        if not result or not result.get('entry_ids'):
+            protein_name = row.get('Protein Name', '')
+            result = _resolve_highlight_query(protein_name, loaded_data, active_species)
+        return None, result
+    else:
+        # Single click: just track which row was clicked, leave UMAP alone.
+        return {'row': row_idx, 'entry': entry_id}, dash.no_update
 
 
 # --- Toggle species in active-species-store ---

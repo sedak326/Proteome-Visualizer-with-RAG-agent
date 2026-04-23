@@ -1,32 +1,17 @@
 #!/usr/bin/env python3
 """
-build_eval_corpus.py — Export PLVis ChromaDB chunks to AutoRAG eval parquets.
+build_eval_corpus_ollama.py — Export ChromaDB chunks to AutoRAG eval parquets.
 
-Extracts all 2,628 chunks from the marine_rag_v1 Chroma collection and writes
-two files to eval/:
+Writes two files to eval/:
 
   corpus_plvis.parquet  — one row per chunk (AutoRAG Corpus format)
-      doc_id         — ChromaDB UUID
-      contents       — chunk text (includes GPT-4o-mini image descriptions)
-      path           — source file path (derived from document_name metadata)
-      start_end_idx  — [0, len(contents)] (offsets not stored in ChromaDB)
-      metadata       — full metadata dict from ChromaDB
-
   raw_plvis.parquet     — one row per source document (AutoRAG Raw format)
-      texts          — all chunks for that document concatenated
-      path           — source file path
-      page           — -1 (page-level splitting not used)
-      last_modified_datetime — today's date (not stored in ChromaDB)
-
-The Raw is built from the corpus so that GPT-4o-mini image descriptions are
-included — they only exist in the ChromaDB chunks, not in the original files.
 
 Usage:
-    cd PLVis-Extension-with-Marine-Mammals-and-RAG/Marine_RAG
-    python build_eval_corpus.py
+    python build_eval_corpus_ollama.py
 
 Requires:
-    pip install chromadb pandas pyarrow
+    pip install langchain-community langchain-ollama chromadb pandas pyarrow
 """
 
 from __future__ import annotations
@@ -34,37 +19,29 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-import chromadb
 import pandas as pd
+from langchain_community.vectorstores import Chroma
+from langchain_ollama import OllamaEmbeddings
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-CHROMA_PERSIST_DIR  = Path(__file__).resolve().parent / "chroma_db"
-COLLECTION_NAME     = "marine_rag_v1"
-DATA_DIR            = Path(__file__).resolve().parent / "data"
-OUTPUT_DIR          = Path(__file__).resolve().parent / "eval"
+CHROMA_PERSIST_DIR  = Path("/workspace/RAGapplication_multiPDF/eval/chroma_db")
+COLLECTION_NAME     = "paypal_docs_v1"
+DATA_DIR            = Path("/workspace/RAGapplication_multiPDF/data")
+OUTPUT_DIR          = Path("/workspace/RAGapplication_multiPDF/eval")
 CORPUS_OUTPUT_PATH  = OUTPUT_DIR / "corpus_plvis.parquet"
 RAW_OUTPUT_PATH     = OUTPUT_DIR / "raw_plvis.parquet"
+OLLAMA_URL          = "http://localhost:11434"
+EMBEDDING_MODEL     = "nomic-embed-text"
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _resolve_path(document_name: str, data_dir: Path) -> str:
-    """
-    Try to match document_name back to an actual file in data_dir.
-
-    ChromaDB metadata stores document_name as either:
-      - The chapter title for HTML files  (e.g. 'Abundance Estimation')
-      - A sanitised PDF stem              (e.g. '1471 2148 9 20')
-
-    We scan data_dir once and pick the closest match by checking whether the
-    document_name tokens appear in the filename. Falls back to the raw name.
-    """
     if not hasattr(_resolve_path, "_index"):
-        # Build a lookup: lower-cased filename stem → actual filename
         _resolve_path._index = {
             f.stem.lower().replace("-", " ").replace("_", " "): f.name
             for f in data_dir.iterdir()
@@ -75,13 +52,12 @@ def _resolve_path(document_name: str, data_dir: Path) -> str:
     if normalised in _resolve_path._index:
         return f"data/{_resolve_path._index[normalised]}"
 
-    # Partial match: pick the first filename whose stem contains all tokens
     tokens = normalised.split()
     for stem, fname in _resolve_path._index.items():
         if all(t in stem for t in tokens):
             return f"data/{fname}"
 
-    return f"data/{document_name}"  # fallback
+    return f"data/{document_name}"
 
 
 # ---------------------------------------------------------------------------
@@ -92,8 +68,13 @@ def build_eval_corpus() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading Chroma collection '{COLLECTION_NAME}' from {CHROMA_PERSIST_DIR} …")
-    client = chromadb.PersistentClient(path=str(CHROMA_PERSIST_DIR))
-    col = client.get_collection(COLLECTION_NAME)
+    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_URL)
+    vs = Chroma(
+        persist_directory=str(CHROMA_PERSIST_DIR),
+        embedding_function=embeddings,
+        collection_name=COLLECTION_NAME,
+    )
+    col = vs._collection
     total = col.count()
     print(f"  {total} chunks found")
 
@@ -133,8 +114,6 @@ def build_eval_corpus() -> None:
 
     # ------------------------------------------------------------------
     # Build raw_plvis.parquet — one row per source document
-    # Concatenate all chunk texts per path so image descriptions are
-    # included (they only exist in the ChromaDB chunks, not on disk).
     # ------------------------------------------------------------------
     today = str(date.today())
     raw_rows = (
