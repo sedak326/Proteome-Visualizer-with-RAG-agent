@@ -175,11 +175,13 @@ def build_visual_context(active_species, selected_data, loaded_data=None):
         parts.append(cluster_summary)
 
     if selected_data and selected_data.get('points'):
-        # Must match trace order in update_interactive_graph: loaded_data order filtered to active
+        # Build flat entry_id -> species lookup (avoids curveNumber which is offset by hull traces)
+        entry_to_species = {}
         if loaded_data:
-            active_ordered = [sd['name'] for sd in loaded_data if sd['name'] in active_species]
-        else:
-            active_ordered = [s for s in SPECIES_DATA.keys() if s in active_species]
+            for sd in loaded_data:
+                if sd['name'] in active_species:
+                    for rec in sd['df']:
+                        entry_to_species[str(rec.get('Entry', ''))] = sd['name']
 
         # Single pass — collect everything needed for aggregation and sampling
         cluster_species = {}   # cluster_label -> set of species keys
@@ -189,10 +191,13 @@ def build_visual_context(active_species, selected_data, loaded_data=None):
         sample_points   = []   # list of formatted lines for the representative sample
 
         for point in selected_data['points']:
-            curve_num = point.get('curveNumber', 0)
-            if curve_num >= len(active_ordered):
+            customdata = point.get('customdata', [])
+            if not customdata or len(customdata) < 2:
+                continue  # skip hull/centroid traces (customdata length < 2)
+            entry_id = str(customdata[0])
+            species = entry_to_species.get(entry_id)
+            if not species:
                 continue
-            species = active_ordered[curve_num]
             species_counts[species] = species_counts.get(species, 0) + 1
 
             hover = point.get('text', '')
@@ -203,10 +208,6 @@ def build_visual_context(active_species, selected_data, loaded_data=None):
                 cluster_species.setdefault(cluster_label, set()).add(species)
                 cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
 
-            customdata = point.get('customdata', [])
-            if not customdata:
-                continue
-            entry_id = str(customdata[0])
             ann = ANNOTATIONS.get(entry_id, {})
 
             # Aggregate domain frequencies across the full selection
@@ -308,7 +309,9 @@ def route_message(chat_history, new_message, visual_context=""):
                     "'remove orca from the plot' → SPECIES: remove orca, "
                     "'show only gray whale' → SPECIES: show only gray whale, "
                     "'add all species' → SPECIES: add all, "
-                    "'add bottlenose dolphin' → SPECIES: add bottlenose dolphin. "
+                    "'add bottlenose dolphin' → SPECIES: add bottlenose dolphin, "
+                    "'add polar bear' → SPECIES: add polar bear, "
+                    "'add hippo' → SPECIES: add hippopotamus. "
                     "Output 'SPECIES: ' followed by the action phrase, nothing else.\n"
                     "- CLUSTER_SEARCH: <protein or domain name> — use when the user asks WHICH "
                     "clusters contain a specific protein, domain, or function: 'which clusters have "
@@ -463,12 +466,13 @@ def query_rag(query_text, visual_context=""):
 
         system_content = (
             "You are a marine biology knowledge assistant embedded inside the Marine Mammal Proteome Explorer, "
-            "a tool for visualising and exploring the proteomes of five Southern California marine mammals: "
+            "a tool for visualising and exploring the proteomes of seven marine and semi-aquatic mammals: "
             "gray whale (Eschrichtius robustus), killer whale (Orcinus orca), California sea lion (Zalophus californianus), "
-            "harbor seal (Phoca vitulina), and bottlenose dolphin (Tursiops truncatus).\n\n"
+            "harbor seal (Phoca vitulina), bottlenose dolphin (Tursiops truncatus), "
+            "polar bear (Ursus maritimus), and hippopotamus (Hippopotamus amphibius).\n\n"
             "Tool methodology: Protein sequences were embedded with ProtT5-XL, a transformer-based protein language model "
             "pre-trained on UniRef50 that encodes structural, functional, and evolutionary properties into fixed-length vectors. "
-            "A single shared UMAP was computed across all five species so positions are directly comparable. "
+            "A single shared UMAP was computed across all seven species so positions are directly comparable. "
             "UMAP (Uniform Manifold Approximation and Projection) is a dimensionality reduction technique: proteins that are "
             "functionally or evolutionarily similar end up close together in the 2D plot, while dissimilar proteins are far apart. "
             "Clustering was performed with HDBSCAN on the 2D UMAP coordinates. "
@@ -478,7 +482,8 @@ def query_rag(query_text, visual_context=""):
             "Cluster enrichment is assessed by hypergeometric test on HMM domain annotations (fold-enrichment > 1.5, p < 0.05).\n\n"
             "Visualisation colours: each species is assigned a fixed colour — "
             "California Sea Lion: red (#E6194B), Bottlenose Dolphin: blue (#4363D8), "
-            "Gray Whale: green (#3CB44B), Orca: magenta (#F032E6), Harbor Seal: brown (#9A6324). "
+            "Gray Whale: green (#3CB44B), Orca: magenta (#F032E6), Harbor Seal: brown (#9A6324), "
+            "Polar Bear: cyan (#46F0F0), Hippopotamus: orange (#F58231). "
             "Each dot in the UMAP represents one protein from one species. "
             "When multiple species share the same protein family, their dots cluster together in the same region, "
             "reflecting shared evolutionary heritage. Highlighted proteins are shown with gold rings.\n\n"
@@ -660,6 +665,22 @@ SPECIES_DATA = {
         'display_name': 'Harbor Seal',
         'key': 'harborseal'
     },
+    'Polar Bear': {
+        'csv': str(BASE_DIR / 'umap_output/Polar Bear_umap.csv'),
+        'image': str(BASE_DIR / 'animal_pics/polarbear.png'),
+        'color': '#46F0F0',
+        'glow': 'rgba(70, 240, 240, 0.4)',
+        'display_name': 'Polar Bear',
+        'key': 'polarbear'
+    },
+    'Hippopotamus': {
+        'csv': str(BASE_DIR / 'umap_output/Hippopotamus_umap.csv'),
+        'image': str(BASE_DIR / 'animal_pics/hippo.png'),
+        'color': '#F58231',
+        'glow': 'rgba(245, 130, 49, 0.4)',
+        'display_name': 'Hippopotamus',
+        'key': 'hippo'
+    },
 }
 
 SAMPLE_SIZE = 3000
@@ -676,6 +697,8 @@ ANNOTATION_FILES = {
     'harborseal': [str(BASE_DIR / 'annotated/harborseal_part1_annotated.csv'), str(BASE_DIR / 'annotated/harborseal_part2_annotated.csv')],
     'orca': [str(BASE_DIR / 'annotated/orca_part1_annotated.csv'), str(BASE_DIR / 'annotated/orca_part2_annotated.csv')],
     'sealion': [str(BASE_DIR / 'annotated/sealion_part1_annotated.csv'), str(BASE_DIR / 'annotated/sealion_part2_annotated.csv')],
+    'polarbear': [str(BASE_DIR / 'annotated/polarbear_part1_annotated.csv'), str(BASE_DIR / 'annotated/polarbear_part2_annotated.csv')],
+    'hippo': [str(BASE_DIR / 'annotated/hippo_part1_annotated.csv'), str(BASE_DIR / 'annotated/hippo_part2_annotated.csv')],
 }
 
 def load_annotations():
@@ -1383,6 +1406,18 @@ app.layout = html.Div([
             html.Div(style={'width': 1, 'height': 28, 'background': 'rgba(100, 255, 218, 0.2)',
                            'flexShrink': '0'}),
 
+            # Phylogeny toggle
+            html.Button('🌿 Phylogeny', id='phylo-toggle-btn', n_clicks=0,
+                       style={'padding': '4px 10px', 'backgroundColor': 'transparent',
+                              'color': '#64ffda', 'border': '1px solid rgba(100,255,218,0.3)',
+                              'borderRadius': 8, 'cursor': 'pointer',
+                              'fontFamily': '"JetBrains Mono", monospace',
+                              'fontSize': 11, 'fontWeight': '500', 'flexShrink': '0'}),
+
+            # Separator
+            html.Div(style={'width': 1, 'height': 28, 'background': 'rgba(100, 255, 218, 0.2)',
+                           'flexShrink': '0'}),
+
             # Point Size slider
             html.Div([
                 html.Label("Size",
@@ -1421,7 +1456,7 @@ app.layout = html.Div([
                     id='protein-filter',
                     options=[
                         {'label': 'ALL', 'value': 'all'},
-                        {'label': 'UNIQUE', 'value': 'unique'},
+                        {'label': 'SPECIES-SPECIFIC', 'value': 'unique'},
                         {'label': 'SHARED', 'value': 'shared'}
                     ],
                     value='all',
@@ -1450,6 +1485,22 @@ app.layout = html.Div([
                  'border': '1px solid rgba(100, 255, 218, 0.15)',
                  'boxShadow': '0 4px 20px rgba(0, 0, 0, 0.3)',
                  'marginBottom': 10, 'flexWrap': 'wrap'}),
+
+        # Phylogenetic tree panel (collapsible)
+        html.Div(id='phylo-panel', children=[
+            dcc.Graph(
+                id='phylo-tree-graph',
+                config={'displayModeBar': False, 'responsive': True},
+                style={'height': '220px', 'width': '100%'},
+            )
+        ], style={
+            'background': 'rgba(10, 25, 47, 0.85)',
+            'borderRadius': 12,
+            'border': '1px solid rgba(100, 255, 218, 0.12)',
+            'padding': '4px 8px',
+            'marginBottom': 10,
+            'display': 'none',
+        }),
 
         # Full-width Plot
         html.Div([
@@ -1600,20 +1651,21 @@ app.layout = html.Div([
 ], style={'fontFamily': 'Arial, sans-serif'})
 
 def _compute_filter_tags(species_data_list):
-    """Compute unique/shared tags based on cluster membership across active species."""
-    cluster_species = {}
+    """Tag proteins as unique (unclustered, Cluster Label == -1) or shared (in a cluster).
+
+    With highly conserved mammalian proteomes, every HDBSCAN cluster contains proteins
+    from all species. 'Unique' therefore means proteins that did NOT cluster with any
+    other proteins — HDBSCAN noise points (label == -1). These represent functionally
+    orphan proteins with no close analogs in the other species' proteomes.
+    """
     for sd in species_data_list:
         for rec in sd['df']:
             cl = rec.get('Cluster Label')
-            if cl is not None and str(cl) != 'nan' and int(cl) >= 0:
-                cluster_species.setdefault(int(cl), set()).add(sd['name'])
-    for sd in species_data_list:
-        for rec in sd['df']:
-            cl = rec.get('Cluster Label')
-            if cl is not None and str(cl) != 'nan' and int(cl) >= 0 and int(cl) in cluster_species:
-                rec['filter_tag'] = 'unique' if len(cluster_species[int(cl)]) == 1 else 'shared'
-            else:
-                rec['filter_tag'] = 'shared'
+            try:
+                is_unclustered = cl is None or int(float(cl)) < 0
+            except (TypeError, ValueError):
+                is_unclustered = True
+            rec['filter_tag'] = 'unique' if is_unclustered else 'shared'
     return species_data_list
 
 
@@ -1668,6 +1720,8 @@ def update_selected_display(*n_clicks_list):
     selected = [species for species, clicks in zip(SPECIES_DATA.keys(), n_clicks_list)
                 if clicks and clicks % 2 == 1]
 
+    MAX_SPECIES = 3
+
     if not selected:
         display = "No organisms selected"
         disabled = True
@@ -1676,6 +1730,34 @@ def update_selected_display(*n_clicks_list):
             'backgroundColor': 'rgba(100, 100, 100, 0.1)',
             'color': '#457b9d',
             'border': '1px solid rgba(100, 100, 100, 0.2)',
+            'borderRadius': 30,
+            'cursor': 'not-allowed', 'fontWeight': '500',
+            'transition': 'all 0.3s ease',
+            'fontFamily': '"JetBrains Mono", monospace',
+            'letterSpacing': '2px',
+            'textTransform': 'uppercase'
+        }
+    elif len(selected) > MAX_SPECIES:
+        display = html.Div([
+            html.Div([
+                html.Span([
+                    html.Span("●", style={'marginRight': 8, 'fontSize': 10}),
+                    f"{SPECIES_DATA[species]['display_name']}"
+                ], style={'color': SPECIES_DATA[species]['color'],
+                         'fontWeight': '500', 'marginRight': 20, 'fontSize': 15,
+                         'fontFamily': '"Inter", sans-serif'})
+                for species in selected
+            ]),
+            html.Div(f"Maximum {MAX_SPECIES} species — please deselect {len(selected) - MAX_SPECIES}",
+                     style={'color': '#ff6b6b', 'fontSize': 12, 'marginTop': 8,
+                            'fontFamily': '"JetBrains Mono", monospace'})
+        ])
+        disabled = True
+        btn_style = {
+            'padding': '16px 48px', 'fontSize': 13,
+            'backgroundColor': 'rgba(100, 100, 100, 0.1)',
+            'color': '#457b9d',
+            'border': '1px solid rgba(255, 107, 107, 0.4)',
             'borderRadius': 30,
             'cursor': 'not-allowed', 'fontWeight': '500',
             'transition': 'all 0.3s ease',
@@ -2345,7 +2427,7 @@ _GENERIC_BIOLOGY_TERMS = {
     'domain', 'domains', 'sequence', 'sequences', 'amino acid', 'amino acids',
     'peptide', 'peptides', 'cell', 'cells', 'molecule', 'molecules',
     'function', 'functions', 'structure', 'structures', 'biology', 'marine',
-    'mammal', 'mammals', 'whale', 'seal', 'dolphin', 'orca',
+    'mammal', 'mammals', 'whale', 'seal', 'dolphin', 'orca', 'hippo', 'bear',
 }
 
 def _extract_protein_search_term(query):
@@ -2505,7 +2587,7 @@ def _resolve_ui_command(text, current_size, current_opacity):
 
     # --- Protein filter ---
     if any(w in t for w in ['unique', 'species-specific', 'species specific']):
-        return 'unique', no, no, "Showing only **unique** proteins — those found in just one species. 🔬"
+        return 'unique', no, no, "Showing only **species-specific** proteins — those not grouped into any shared functional cluster. 🔬"
     if 'shared' in t or 'common' in t or 'conserved' in t:
         return 'shared', no, no, "Showing only **shared** proteins — those found across multiple species. 🌊"
     if any(p in t for p in ['all protein', 'show all', 'reset filter', 'clear filter', 'no filter']):
@@ -2793,27 +2875,23 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
 
     fig = go.Figure()
 
-    # Draw convex hull for each cluster in the background
+    # Build convex hulls for all clusters, merged into 2 traces (fill + border) using None
+    # separators. This replaces 263 individual traces with 2, dramatically reducing browser load.
+    # Skip entirely when species-specific filter is active (no clusters shown then).
     cluster_points = {}
-    for sd in active_data:
-        for r in sd['df']:
-            cl = r.get('Cluster Label')
-            if cl is None or str(cl) == 'nan' or int(cl) < 0:
-                continue
-            cl = int(cl)
-            cluster_points.setdefault(cl, []).append(
-                (r['UMAP 1 Scaled'], r['UMAP 2 Scaled'])
-            )
+    if protein_filter != 'unique':
+        for sd in active_data:
+            for r in sd['df']:
+                cl = r.get('Cluster Label')
+                if cl is None or str(cl) == 'nan' or int(cl) < 0:
+                    continue
+                cl = int(cl)
+                cluster_points.setdefault(cl, []).append(
+                    (r['UMAP 1 Scaled'], r['UMAP 2 Scaled'])
+                )
 
-    # Colour hulls by cluster size: small=cool blue, large=warm red (viridis-like)
-    cluster_sizes = {cl: len(pts) for cl, pts in cluster_points.items()}
-    min_sz = min(cluster_sizes.values()) if cluster_sizes else 1
-    max_sz = max(cluster_sizes.values()) if cluster_sizes else 1
-
-    def _size_to_rgb(n):
-        """Map cluster size to RGB using a blue→cyan→green→yellow→red gradient."""
+    def _size_to_rgb(n, min_sz, max_sz):
         t = (n - min_sz) / (max_sz - min_sz + 1e-9)
-        # Control points: blue(0) → cyan(0.25) → green(0.5) → yellow(0.75) → red(1)
         stops = [
             (0.00, (60,  100, 220)),
             (0.25, (60,  200, 210)),
@@ -2830,53 +2908,50 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
         return stops[-1][1]
 
     centroid_x, centroid_y, centroid_cl, centroid_colors = [], [], [], []
-    for idx, (cl, points) in enumerate(sorted(cluster_points.items())):
-        if len(points) < 3:
-            continue
-        try:
-            r, g, b = _size_to_rgb(len(points))
-            pts = np.array(points)
-            hull = ConvexHull(pts)
-            verts = pts[hull.vertices]
-            hull_x = verts[:, 0].tolist() + [verts[0, 0]]
-            hull_y = verts[:, 1].tolist() + [verts[0, 1]]
-            n_pts = len(hull_x)
+
+    if cluster_points:
+        cluster_sizes = {cl: len(pts) for cl, pts in cluster_points.items()}
+        min_sz = min(cluster_sizes.values())
+        max_sz = max(cluster_sizes.values())
+
+        # Merged fill polygons — one trace, separated by None
+        fill_x, fill_y, fill_colors = [], [], []
+        border_x, border_y, border_colors = [], [], []
+
+        for cl, points in sorted(cluster_points.items()):
+            if len(points) < 3:
+                continue
+            try:
+                pts = np.array(points)
+                hull = ConvexHull(pts)
+                verts = pts[hull.vertices]
+                r, g, b = _size_to_rgb(len(points), min_sz, max_sz)
+                poly_x = verts[:, 0].tolist() + [verts[0, 0], None]
+                poly_y = verts[:, 1].tolist() + [verts[0, 1], None]
+                fill_x.extend(poly_x)
+                fill_y.extend(poly_y)
+                border_x.extend(poly_x)
+                border_y.extend(poly_y)
+                fill_colors.append(f'rgba({r},{g},{b},0.13)')
+                border_colors.append(f'rgba({r},{g},{b},0.5)')
+                cx, cy = pts[:, 0].mean(), pts[:, 1].mean()
+                centroid_x.append(cx)
+                centroid_y.append(cy)
+                centroid_cl.append(cl)
+                centroid_colors.append(f'rgba({r},{g},{b},0.9)')
+            except Exception:
+                pass
+
+        if fill_x:
             fig.add_trace(go.Scatter(
-                x=hull_x, y=hull_y,
+                x=fill_x, y=fill_y,
                 fill='toself',
-                fillcolor=f'rgba({r},{g},{b},0.13)',
-                line=dict(color=f'rgba({r},{g},{b},0.45)', width=1.5),
+                fillcolor='rgba(80,130,220,0.10)',
+                line=dict(color='rgba(80,130,220,0.35)', width=1),
                 mode='lines',
-                customdata=[[cl]] * n_pts,
-                hovertemplate=f'<b>Cluster {cl}</b> — click label to select<extra></extra>',
+                hoverinfo='skip',
                 showlegend=False,
             ))
-            # Collect centroid for clickable label trace
-            cx, cy = pts[:, 0].mean(), pts[:, 1].mean()
-            centroid_x.append(cx)
-            centroid_y.append(cy)
-            centroid_cl.append(cl)
-            centroid_colors.append(f'rgba({r},{g},{b},0.9)')
-        except Exception:
-            pass
-
-    # One trace of cluster-centroid markers — large enough to click, labeled with cluster number
-    if centroid_x:
-        fig.add_trace(go.Scatter(
-            x=centroid_x, y=centroid_y,
-            mode='markers+text',
-            marker=dict(
-                size=18,
-                color='rgba(0,0,0,0)',       # transparent fill
-                line=dict(width=0),
-            ),
-            text=[str(c) for c in centroid_cl],
-            textfont=dict(size=9, color=centroid_colors),
-            textposition='middle center',
-            customdata=[[c] for c in centroid_cl],
-            hovertemplate='<b>Cluster %{customdata[0]}</b> — click to select<extra></extra>',
-            showlegend=False,
-        ))
 
     for species_data in active_data:
         df_records = species_data['df']
@@ -2916,6 +2991,24 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
             hovertemplate='%{text}<extra></extra>',
             customdata=[[r['Entry'], r.get('Cluster Label', -1)] for r in df_records]
         ))
+    # Centroid labels on top of everything — large hit target so clicks land reliably
+    if centroid_x:
+        fig.add_trace(go.Scatter(
+            x=centroid_x, y=centroid_y,
+            mode='markers+text',
+            marker=dict(
+                size=28,
+                color='rgba(255,255,255,0.08)',
+                line=dict(color='rgba(180,200,255,0.35)', width=1),
+            ),
+            text=[str(c) for c in centroid_cl],
+            textfont=dict(size=9, color=centroid_colors),
+            textposition='middle center',
+            customdata=[[c] for c in centroid_cl],
+            hovertemplate='<b>Cluster %{customdata[0]}</b> — click to select<extra></extra>',
+            showlegend=False,
+        ))
+
     # Highlight overlay — gold ring on top, transparent fill preserves species colors
     if highlight_data and highlight_data.get('xs'):
         fig.add_trace(go.Scattergl(
@@ -3127,32 +3220,28 @@ def show_selected_proteins(selectedData, highlight_data, loaded_data, active_spe
 
     try:
         active_species = active_species or []
-        # Filter to active species (same order as graph traces)
         active_data = [sd for sd in loaded_data if sd['name'] in active_species]
 
-        # Build lookup: {species_name: {entry_id: record}} for customdata-based lookup
-        species_lookup = {}
-        for species_data in active_data:
-            entry_map = {}
-            for record in species_data['df']:
-                entry_map[record['Entry']] = record
-            species_lookup[species_data['name']] = entry_map
+        # Flat lookup: entry_id -> (species_name, record). Avoids curveNumber entirely —
+        # hull/centroid traces are added before species traces so curveNumber is unreliable.
+        entry_lookup = {}
+        for sd in active_data:
+            for record in sd['df']:
+                entry_lookup[str(record['Entry'])] = (sd['name'], record)
 
         selected_proteins = []
+        seen = set()
         for point in selectedData['points']:
-            curve_num = point['curveNumber']
-            if curve_num >= len(active_data):
-                continue
-
-            species_data = active_data[curve_num]
-
-            # Use customdata to find the correct protein (filter-safe)
             customdata = point.get('customdata')
-            if customdata and len(customdata) > 0:
-                entry_id = customdata[0]
-                protein = species_lookup.get(species_data['name'], {}).get(entry_id)
-            else:
+            # Species scatter customdata = [entry_id, cluster_label] (len >= 2, entry is a string)
+            # Hull/centroid customdata = [cluster_int] (len == 1) — skip these
+            if not customdata or len(customdata) < 2:
                 continue
+            entry_id = str(customdata[0])
+            if entry_id in seen or entry_id not in entry_lookup:
+                continue
+            seen.add(entry_id)
+            species_name, protein = entry_lookup[entry_id]
 
             if not protein:
                 continue
@@ -3171,7 +3260,7 @@ def show_selected_proteins(selectedData, highlight_data, loaded_data, active_spe
 
             selected_proteins.append({
                 'Entry': protein.get('Entry', 'N/A'),
-                'Organism': SPECIES_DATA[species_data['name']]['display_name'],
+                'Organism': SPECIES_DATA.get(species_name, {}).get('display_name', species_name),
                 'Protein Name': protein_name[:80],
                 'Sequence': seq_preview,
                 'Cluster': str(protein.get('Cluster Label', 'N/A')),
@@ -3407,15 +3496,38 @@ app.clientside_callback(
      State('highlight-store', 'data'),
      State('point-size', 'value'),
      State('opacity', 'value'),
-     State('selected-cluster-store', 'data')],
+     State('selected-cluster-store', 'data'),
+     State('protein-filter', 'value')],
     prevent_initial_call=True,
 )
-def process_chat_query(pending_query, chat_history, active_species, selected_data, loaded_data, highlight_store, current_size, current_opacity, selected_cluster):
+def process_chat_query(pending_query, chat_history, active_species, selected_data, loaded_data, highlight_store, current_size, current_opacity, selected_cluster, protein_filter):
     if not pending_query:
         raise dash.exceptions.PreventUpdate
 
     chat_history = chat_history or []
     visual_context = build_visual_context(active_species, selected_data, loaded_data)
+
+    # Inject active filter context
+    if protein_filter and protein_filter != 'all':
+        if protein_filter == 'unique':
+            active_data = [sd for sd in (loaded_data or []) if sd['name'] in (active_species or [])]
+            _compute_filter_tags(active_data)
+            sample = []
+            for sd in active_data:
+                for rec in sd['df']:
+                    if rec.get('filter_tag') == 'unique' and len(sample) < 10:
+                        entry = rec.get('Entry', '')
+                        ann = ANNOTATIONS.get(str(entry), {})
+                        name = (ann.get('desc', '') or '').split(' OS=')[0].strip() or entry
+                        sample.append(f"  - {entry} ({sd['name']}): {name[:80]}")
+            sample_str = '\n'.join(sample) if sample else '  (none in current view sample)'
+            visual_context += (
+                f"\n\nActive filter: SPECIES-SPECIFIC proteins only "
+                f"(proteins not grouped into any shared cluster — ~33% of each proteome).\n"
+                f"Sample species-specific proteins currently shown:\n{sample_str}"
+            )
+        elif protein_filter == 'shared':
+            visual_context += "\n\nActive filter: SHARED proteins only (proteins grouped into clusters present across multiple species)."
 
     # Inject selected-cluster context so subsequent questions are cluster-aware
     if selected_cluster:
@@ -3569,6 +3681,216 @@ def process_chat_query(pending_query, chat_history, active_species, selected_dat
     chat_history.append({"role": "user", "content": pending_query})
     chat_history.append({"role": "assistant", "content": answer})
     return _render(chat_history), chat_history, new_highlight, new_active_species, new_filter, new_size, new_opacity
+
+
+# ── Phylogenetic tree panel ────────────────────────────────────────────────────
+
+def _build_phylo_figure(active_species):
+    """Return a Plotly figure of the 10-taxon mammal tree, with active species highlighted."""
+    import plotly.graph_objects as go
+
+    BG        = '#08111f'
+    BRANCH    = 'rgba(100,255,218,0.25)'
+    LABEL_CLR = '#a8dadc'
+    GRAY_NODE = 'rgba(100,255,218,0.18)'
+
+    # Tool species → app color
+    TOOL_KEYS = {k: SPECIES_DATA[k]['color'] for k in SPECIES_DATA}
+    # Map leaf key → display info
+    LEAVES = [
+        ('human',      9.0, 'Human',               False, None),
+        ('hippo',      8.0, 'Hippopotamus',         True,  'Hippopotamus'),
+        ('graywhale',  7.0, 'Gray Whale',           True,  'Gray Whale'),
+        ('spermwhale', 6.0, 'Sperm Whale',          False, None),
+        ('orca',       5.0, 'Orca',                 True,  'Orca'),
+        ('bottlenose', 4.0, 'Bottlenose Dolphin',   True,  'Bottlenose Dolphin'),
+        ('polarbear',  3.0, 'Polar Bear',           True,  'Polar Bear'),
+        ('walrus',     2.0, 'Walrus',               False, None),
+        ('harborseal', 1.0, 'Harbor Seal',          True,  'Harbor Seal'),
+        ('sealion',    0.0, 'Sea Lion',             True,  'Sea Lion'),
+    ]
+
+    active_set = set(active_species or [])
+
+    # Geometry (same as matplotlib figure)
+    LEAF_X = 6.8
+    X_ROOT, X_LAUR = 0.60, 1.60
+    X_CETARTIO, X_CET, X_ODONT, X_DELPH = 2.75, 3.95, 5.10, 6.05
+    X_CARN, X_PINN, X_PHOC_OTA = 2.75, 3.95, 5.10
+
+    y_delph    = 4.5
+    y_odont    = (6.0 + y_delph) / 2
+    y_cet      = (7.0 + y_odont) / 2
+    y_cetartio = (8.0 + y_cet)   / 2
+    y_phoc_ota = 0.5
+    y_pinn     = (2.0 + y_phoc_ota) / 2
+    y_carn     = (3.0 + y_pinn)     / 2
+    y_laur     = (y_cetartio + y_carn) / 2
+    y_root     = (9.0 + y_laur) / 2
+
+    # Segments: list of (x0,y0, x1,y1)
+    segs = [
+        # outgroup
+        (X_ROOT, y_laur, X_ROOT, 9.0), (X_ROOT, 9.0, LEAF_X, 9.0),
+        # root → laur
+        (X_ROOT, y_laur, X_LAUR, y_laur),
+        # laur
+        (X_LAUR, y_carn, X_LAUR, y_cetartio),
+        (X_LAUR, y_cetartio, X_CETARTIO, y_cetartio),
+        (X_LAUR, y_carn, X_CARN, y_carn),
+        # cetartio
+        (X_CETARTIO, y_cet, X_CETARTIO, 8.0),
+        (X_CETARTIO, 8.0, LEAF_X, 8.0),
+        (X_CETARTIO, y_cet, X_CET, y_cet),
+        # cetacea
+        (X_CET, y_odont, X_CET, 7.0), (X_CET, 7.0, LEAF_X, 7.0),
+        (X_CET, y_odont, X_ODONT, y_odont),
+        # odontoceti
+        (X_ODONT, y_delph, X_ODONT, 6.0), (X_ODONT, 6.0, LEAF_X, 6.0),
+        (X_ODONT, y_delph, X_DELPH, y_delph),
+        # delphinidae
+        (X_DELPH, 4.0, X_DELPH, 5.0), (X_DELPH, 5.0, LEAF_X, 5.0), (X_DELPH, 4.0, LEAF_X, 4.0),
+        # carnivora
+        (X_CARN, y_pinn, X_CARN, 3.0), (X_CARN, 3.0, LEAF_X, 3.0),
+        (X_CARN, y_pinn, X_PINN, y_pinn),
+        # pinnipedia
+        (X_PINN, y_phoc_ota, X_PINN, 2.0), (X_PINN, 2.0, LEAF_X, 2.0),
+        (X_PINN, y_phoc_ota, X_PHOC_OTA, y_phoc_ota),
+        (X_PHOC_OTA, 0.0, X_PHOC_OTA, 1.0),
+        (X_PHOC_OTA, 1.0, LEAF_X, 1.0), (X_PHOC_OTA, 0.0, LEAF_X, 0.0),
+    ]
+
+    shapes = []
+    for x0, y0, x1, y1 in segs:
+        shapes.append(dict(type='line', x0=x0, y0=y0, x1=x1, y1=y1,
+                           line=dict(color=BRANCH, width=1.5)))
+
+    # Leaf nodes + labels
+    node_x, node_y, node_colors, node_sizes, node_text, node_custom = [], [], [], [], [], []
+    for key, y, label, is_tool, sp_key in LEAVES:
+        is_active   = sp_key in active_set if sp_key else False
+        is_outgroup = key == 'human'
+        if is_tool and sp_key:
+            color = TOOL_KEYS.get(sp_key, '#64ffda')
+        else:
+            color = 'rgba(100,255,218,0.25)'
+        opacity = 1.0 if is_active else (0.25 if is_tool else 0.15)
+        node_x.append(LEAF_X)
+        node_y.append(y)
+        node_colors.append(color)
+        node_sizes.append(10 if is_active else 6)
+        # customdata: species key for toggling (None if not a tool species)
+        node_custom.append(sp_key)
+        node_text.append(
+            f"<b style='color:{color}'>{label}</b>" if is_active
+            else f"<span style='color:rgba(168,218,220,0.4)'>{label}</span>"
+        )
+
+    # Clade labels
+    annots = [
+        dict(x=X_CET+0.05, y=y_cet+0.08, text='<i>Cetacea</i>',
+             font=dict(size=8, color='rgba(100,255,218,0.5)'), showarrow=False, xanchor='left'),
+        dict(x=X_PINN+0.05, y=y_pinn+0.08, text='<i>Pinnipedia</i>',
+             font=dict(size=8, color='rgba(100,255,218,0.5)'), showarrow=False, xanchor='left'),
+        dict(x=X_CETARTIO+0.05, y=y_cetartio+0.08, text='<i>Cetartiodactyla</i>',
+             font=dict(size=8, color='rgba(100,255,218,0.5)'), showarrow=False, xanchor='left'),
+        dict(x=X_CARN+0.05, y=y_carn+0.08, text='<i>Carnivora</i>',
+             font=dict(size=8, color='rgba(100,255,218,0.5)'), showarrow=False, xanchor='left'),
+    ]
+
+    # Label trace (text to the right of nodes)
+    label_trace = go.Scatter(
+        x=[LEAF_X + 0.25] * len(LEAVES),
+        y=[l[1] for l in LEAVES],
+        mode='text',
+        text=[l[2] for l in LEAVES],
+        textfont=dict(size=9, family='JetBrains Mono, monospace'),
+        textposition='middle right',
+        hoverinfo='skip',
+    )
+    # Update label colors
+    label_trace.textfont = dict(
+        size=9,
+        family='JetBrains Mono, monospace',
+        color=[
+            (TOOL_KEYS.get(l[4], '#64ffda') if l[3] and l[4] in active_set
+             else ('rgba(168,218,220,0.35)' if not l[3] else 'rgba(168,218,220,0.6)'))
+            for l in LEAVES
+        ]
+    )
+
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers',
+        marker=dict(
+            color=node_colors,
+            size=node_sizes,
+            line=dict(width=0),
+            opacity=[1.0 if s in active_set else (0.3 if LEAVES[i][3] else 0.15)
+                     for i, s in enumerate([l[4] for l in LEAVES])],
+        ),
+        customdata=node_custom,
+        hovertemplate='%{customdata}<extra></extra>',
+        text=[l[2] for l in LEAVES],
+    )
+
+    fig = go.Figure(data=[label_trace, node_trace])
+    fig.update_layout(
+        shapes=shapes,
+        annotations=annots,
+        paper_bgcolor=BG,
+        plot_bgcolor=BG,
+        margin=dict(l=10, r=120, t=6, b=6),
+        xaxis=dict(visible=False, range=[-0.2, 11.5]),
+        yaxis=dict(visible=False, range=[-0.7, 9.7]),
+        showlegend=False,
+        hovermode='closest',
+        font=dict(family='JetBrains Mono, monospace', color=LABEL_CLR),
+        height=220,
+    )
+    return fig
+
+
+@app.callback(
+    Output('phylo-panel', 'style'),
+    Input('phylo-toggle-btn', 'n_clicks'),
+    State('phylo-panel', 'style'),
+    prevent_initial_call=True,
+)
+def toggle_phylo_panel(n_clicks, current_style):
+    style = dict(current_style)
+    style['display'] = 'none' if style.get('display') != 'none' else 'block'
+    return style
+
+
+@app.callback(
+    Output('phylo-tree-graph', 'figure'),
+    Input('active-species-store', 'data'),
+)
+def update_phylo_tree(active_species):
+    return _build_phylo_figure(active_species)
+
+
+@app.callback(
+    Output('active-species-store', 'data', allow_duplicate=True),
+    Input('phylo-tree-graph', 'clickData'),
+    State('active-species-store', 'data'),
+    prevent_initial_call=True,
+)
+def phylo_click_toggle(click_data, active_species):
+    if not click_data:
+        raise dash.exceptions.PreventUpdate
+    sp_key = click_data['points'][0].get('customdata')
+    if not sp_key or sp_key not in SPECIES_DATA:
+        raise dash.exceptions.PreventUpdate
+    active = list(active_species or [])
+    if sp_key in active:
+        if len(active) <= 1:
+            raise dash.exceptions.PreventUpdate
+        active.remove(sp_key)
+    else:
+        active.append(sp_key)
+    return active
 
 
 server = app.server

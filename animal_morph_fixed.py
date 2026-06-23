@@ -16,12 +16,14 @@ matplotlib.use('Agg')  # Use non-interactive backend for script generation
 
 # Mapping of species keys to file paths
 SPECIES_MAP = {
-    'sealion': ("animal_pics/sealion.png", "umap_output/California Sealion_umap.csv"),
-    'bottlenose': ("animal_pics/bottlenose.png", "umap_output/Bottlenose Dolphin_umap.csv"),
-    'graywhale': ("animal_pics/graywhale.png", "umap_output/Graywhale_umap.csv"),
-    'orca': ("animal_pics/orca.png", "umap_output/Killer whale_umap.csv"),
-    'harborseal': ("animal_pics/harbor_seal.png", "umap_output/Harborseal_umap.csv"),
-    'cobra': ("animal_pics/cobra.png", "umap_output/King Cobra_umap.csv"),
+    'sealion':    ("animal_pics/sealion.png",      "umap_output/California Sealion_umap.csv"),
+    'bottlenose': ("animal_pics/bottlenose.png",   "umap_output/Bottlenose Dolphin_umap.csv"),
+    'graywhale':  ("animal_pics/graywhale.png",    "umap_output/Graywhale_umap.csv"),
+    'orca':       ("animal_pics/orca.png",          "umap_output/Killer whale_umap.csv"),
+    'harborseal': ("animal_pics/harbor_seal.png",  "umap_output/Harborseal_umap.csv"),
+    'cobra':      ("animal_pics/cobra.png",         "umap_output/King Cobra_umap.csv"),
+    'polarbear':  ("animal_pics/polarbear.png",    "umap_output/Polar Bear_umap.csv"),
+    'hippo':      ("animal_pics/hippo.png",         "umap_output/Hippopotamus_umap.csv"),
 }
 
 # Color mapping for each species — must match SPECIES_DATA colors in proteome_explorer_ux2.py
@@ -32,6 +34,8 @@ SPECIES_COLORS = {
     'orca':       np.array([0.941, 0.196, 0.902]),  # #F032E6
     'harborseal': np.array([0.604, 0.388, 0.141]),  # #9A6324
     'cobra':      np.array([0.749, 0.667, 0.0]),    # #BFAA00
+    'polarbear':  np.array([0.275, 0.941, 0.941]),  # #46F0F0
+    'hippo':      np.array([0.961, 0.510, 0.192]),  # #F58231
 }
 
 # Plot boundaries - increased to fit all animals

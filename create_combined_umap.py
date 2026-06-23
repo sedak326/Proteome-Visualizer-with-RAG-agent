@@ -145,6 +145,18 @@ def main():
             'name': 'Zalophus californianus',
             'short_name': 'California Sealion'
         },
+        {
+            'h5': Path('h5py_files/polarbear.h5'),
+            'fasta': Path('fastafiles/no_isoforms/uniprotkb_proteome_UP000261680_2026_06_17.fasta'),
+            'name': 'Ursus maritimus',
+            'short_name': 'Polar Bear'
+        },
+        {
+            'h5': Path('h5py_files/hippo.h5'),
+            'fasta': Path('fastafiles/no_isoforms/GCF_030028045.1_mHipAmp2.hap2_protein.faa'),
+            'name': 'Hippopotamus amphibius',
+            'short_name': 'Hippopotamus'
+        },
     ]
 
     # Step 1: Load all organism data

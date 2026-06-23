@@ -11,7 +11,8 @@ from itertools import combinations
 from pathlib import Path
 
 # All available species
-SPECIES = ['sealion', 'bottlenose', 'graywhale', 'orca', 'harborseal']
+SPECIES = ['sealion', 'bottlenose', 'graywhale', 'orca', 'harborseal', 'polarbear', 'hippo']
+MAX_COMBO_SIZE = 3  # cap at 3 for performance
 
 def generate_all_animations():
     """Generate all non-empty subset combinations (singles through all-six)"""
@@ -21,8 +22,8 @@ def generate_all_animations():
 
     all_combinations = []
 
-    # All subsets of size 1 through len(SPECIES)
-    for size in range(1, len(SPECIES) + 1):
+    # All subsets of size 1 through MAX_COMBO_SIZE
+    for size in range(1, MAX_COMBO_SIZE + 1):
         for combo in combinations(SPECIES, size):
             all_combinations.append(list(combo))
 

@@ -102,7 +102,7 @@ def get_embeddings( seq_path,
             pdb_ids, seqs, seq_lens = zip(*batch)
             batch = list()
 
-            token_encoding = vocab.batch_encode_plus(seqs, add_special_tokens=True, padding="longest")
+            token_encoding = vocab(list(seqs), add_special_tokens=True, padding="longest")
             input_ids      = torch.tensor(token_encoding['input_ids']).to(device)
             attention_mask = torch.tensor(token_encoding['attention_mask']).to(device)
             
