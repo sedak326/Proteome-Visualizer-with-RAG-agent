@@ -6,26 +6,55 @@ import pandas as pd
 import numpy as np
 import h5py
 from pathlib import Path
-import umap
 from sklearn.cluster import HDBSCAN
 from Bio import SeqIO
 import re
+
+try:
+    import cuml.manifold.umap as umap
+    print("Using cuml GPU-accelerated UMAP")
+    _UMAP_CLASS = umap.UMAP
+except ImportError:
+    import umap
+    print("cuml not available, falling back to CPU umap-learn")
+    _UMAP_CLASS = umap.UMAP
 
 # FASTA headers store multiple pieces of metadata in a single string.
 # This function extracts and structures that metadata so it can be
 # reliably used for filtering, labeling and visualization..
 def parse_fasta_header(header):
-    """Parse FASTA header to extract Entry, Protein names, Gene Names, Entry Name, Organism"""
+    """Parse FASTA header to extract Entry, Protein names, Gene Names, Entry Name, Organism.
+
+    Handles two formats:
+      UniProt: >sp|P12345|GENE_HUMAN Protein name OS=Homo sapiens OX=9606 GN=GENE PE=1 SV=1
+      RefSeq:  >NP_001234.1 protein description [Organism name]
+    """
     entry = header.split()[0].replace('>', '')
 
-    organism_match = re.search(r'\[(.*?)\]', header)
-    organism = organism_match.group(1) if organism_match else ''
+    # UniProt format uses OS= for organism; RefSeq uses [Organism]
+    if 'OS=' in header:
+        # Organism: between OS= and the next two-letter field (OX=, GN=, PE=, SV=) or end
+        os_match = re.search(r'OS=(.*?)(?:\s+[A-Z]{2}=|\s*$)', header)
+        organism = os_match.group(1).strip() if os_match else ''
 
-    protein_name_match = re.search(r'>\S+\s+(.*?)\s+\[', header)
-    protein_name = protein_name_match.group(1).strip() if protein_name_match else ''
+        # Protein name: between the entry ID token and OS=
+        pn_match = re.search(r'>\S+\s+(.*?)\s+OS=', header)
+        protein_name = pn_match.group(1).strip() if pn_match else ''
+
+        # Gene name from GN=
+        gn_match = re.search(r'GN=(\S+)', header)
+        gene_names = gn_match.group(1) if gn_match else ''
+    else:
+        # RefSeq: organism in [brackets]
+        organism_match = re.search(r'\[(.*?)\]', header)
+        organism = organism_match.group(1) if organism_match else ''
+
+        pn_match = re.search(r'>\S+\s+(.*?)\s+\[', header)
+        protein_name = pn_match.group(1).strip() if pn_match else ''
+
+        gene_names = ''
 
     entry_name = entry
-    gene_names = ''
 
     return {
         'Entry': entry,
@@ -192,8 +221,8 @@ def main():
         print("ERROR: No data loaded from any organism!", flush=True)
         return
 
-    # Convert to numpy array
-    embeddings_array = np.array(all_embeddings)
+    # Convert to numpy float32 — cuml requires float32, and it's half the memory of float64
+    embeddings_array = np.array(all_embeddings, dtype=np.float32)
     print(f"\n{'=' * 60}", flush=True)
     print(f"Combined embeddings shape: {embeddings_array.shape}", flush=True)
     print(f"Total proteins from all species: {len(all_metadata)}", flush=True)
@@ -204,8 +233,11 @@ def main():
     print("This creates a shared embedding space for all species", flush=True)
     print("-" * 60, flush=True)
 
-    reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
-    embedding_2d = reducer.fit_transform(embeddings_array)
+    # n_neighbors=50 captures global protein-family structure for large cross-species datasets;
+    # n_neighbors=15 (default) only sees local micro-structure and produces a continuous cloud.
+    # min_dist=0.0 tightens clusters so K-means finds real groups instead of diffuse blobs.
+    reducer = _UMAP_CLASS(n_components=2, random_state=42, n_neighbors=50, min_dist=0.0)
+    embedding_2d = np.array(reducer.fit_transform(embeddings_array))  # np.array() handles cupy output
     print(f"UMAP embedding complete!", flush=True)
     print(f"Embedding shape: {embedding_2d.shape}", flush=True)
     print(f"UMAP 1 range: [{embedding_2d[:, 0].min():.2f}, {embedding_2d[:, 0].max():.2f}]", flush=True)

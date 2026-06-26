@@ -472,21 +472,32 @@ def query_rag(query_text, visual_context=""):
             "polar bear (Ursus maritimus), and hippopotamus (Hippopotamus amphibius).\n\n"
             "Tool methodology: Protein sequences were embedded with ProtT5-XL, a transformer-based protein language model "
             "pre-trained on UniRef50 that encodes structural, functional, and evolutionary properties into fixed-length vectors. "
-            "A single shared UMAP was computed across all seven species so positions are directly comparable. "
+            "A single shared UMAP was computed across all seven species (n_neighbors=50, min_dist=0.0) so positions are directly comparable. "
             "UMAP (Uniform Manifold Approximation and Projection) is a dimensionality reduction technique: proteins that are "
             "functionally or evolutionarily similar end up close together in the 2D plot, while dissimilar proteins are far apart. "
-            "Clustering was performed with HDBSCAN on the 2D UMAP coordinates. "
-            "Proteins assigned cluster label -1 are noise points: they did not belong to any sufficiently dense region "
-            "(min_cluster_size=150), which typically means the protein family is too small or too scattered to form a cluster. "
-            "This is expected for single-copy or low-copy-number genes. "
-            "Cluster enrichment is assessed by hypergeometric test on HMM domain annotations (fold-enrichment > 1.5, p < 0.05).\n\n"
-            "Visualisation colours: each species is assigned a fixed colour — "
+            "Clustering was performed with K-means (K=370, chosen by silhouette score optimisation) on the 2D UMAP coordinates. "
+            "There are 370 clusters in total, each named by the most frequent bi-gram in the protein names of that cluster "
+            "(e.g. 'Olfactory Receptor', 'Large Ribosomal', 'Initiation Factor'). "
+            "Species enrichment per cluster is assessed with a hypergeometric test on species membership with "
+            "Benjamini-Hochberg FDR correction (padj < 0.05). A cluster is enriched for species X when X contributes "
+            "significantly more proteins to that cluster than expected given its proteome size. "
+            "20 out of 370 clusters show statistically significant enrichment: "
+            "Polar Bear dominates 4 olfactory receptor clusters (massive OR gene family expansion, biologically meaningful); "
+            "Sea Lion dominates 12 clusters (ribosomal, initiation factor, ATP synthase, NADH dehydrogenase — energy metabolism); "
+            "Harbor Seal has 1 enriched cluster (Protocadherin Gamma); Orca has 2 (Low Quality artifacts from RefSeq annotation). "
+            "Cetaceans (bottlenose dolphin, gray whale) show zero enrichment because their aquatic adaptation involved "
+            "gene loss (olfactory receptor pseudogenization) rather than gene expansion — their signal is depletion, not enrichment. "
+            "Most clusters (350/370) contain proteins from all 7 species, reflecting deep shared evolutionary heritage.\n\n"
+            "Visualisation colours: each species has a fixed colour — "
             "California Sea Lion: red (#E6194B), Bottlenose Dolphin: blue (#4363D8), "
             "Gray Whale: green (#3CB44B), Orca: magenta (#F032E6), Harbor Seal: brown (#9A6324), "
             "Polar Bear: cyan (#46F0F0), Hippopotamus: orange (#F58231). "
             "Each dot in the UMAP represents one protein from one species. "
-            "When multiple species share the same protein family, their dots cluster together in the same region, "
-            "reflecting shared evolutionary heritage. Highlighted proteins are shown with gold rings.\n\n"
+            "Cluster hulls (convex boundaries around clusters) are coloured by enriched species: "
+            "an enriched cluster's hull uses that species' colour at higher opacity; "
+            "non-enriched clusters have neutral gray hulls at low opacity. "
+            "Centroid labels show the cluster name (not number) and are coloured by enriched species. "
+            "Highlighted proteins are shown with gold rings.\n\n"
             "You have two sources of information:\n"
             "1. SCREEN DATA: What the user currently sees in the proteome visualizer "
             "(species displayed, UMAP clusters, selected proteins with IDs, domains, etc.). "
@@ -685,6 +696,17 @@ SPECIES_DATA = {
 
 SAMPLE_SIZE = 3000
 PRERENDERED_DIR = BASE_DIR / 'prerendered_animations'
+
+# Per-cluster species enrichment (hypergeometric, BH-corrected).
+# Cluster Label → {Dominant Species, Dominant Color, All Enriched, Cluster Name}
+def _load_cluster_enrichment():
+    path = BASE_DIR / 'umap_output' / 'cluster_enrichment.csv'
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path)
+    return df.set_index('Cluster Label').to_dict('index')
+
+_CLUSTER_ENRICHMENT: dict = _load_cluster_enrichment()
 
 # Full-resolution search index: species_name -> list of {Entry, Protein names, Cluster Label}
 # Populated when species are loaded; never sampled so protein searches are exhaustive.
@@ -888,7 +910,7 @@ def load_data_for_species(species_list):
             continue
         df = pd.read_csv(csv_path)
         essential_cols = ['Entry', 'Protein names', 'Gene Names', 'Organism',
-                         'UMAP 1', 'UMAP 2', 'Cluster Label', 'Length']
+                         'UMAP 1', 'UMAP 2', 'Cluster Label', 'Cluster Name', 'Length']
         available_cols = [col for col in essential_cols if col in df.columns]
         df = df[available_cols]
         # Store full (unsampled) data for exhaustive protein search before downsampling
@@ -2907,16 +2929,14 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
                 return tuple(int(c0[j] + f * (c1[j] - c0[j])) for j in range(3))
         return stops[-1][1]
 
-    centroid_x, centroid_y, centroid_cl, centroid_colors = [], [], [], []
+    centroid_x, centroid_y, centroid_cl, centroid_colors, centroid_labels = [], [], [], [], []
 
     if cluster_points:
-        cluster_sizes = {cl: len(pts) for cl, pts in cluster_points.items()}
-        min_sz = min(cluster_sizes.values())
-        max_sz = max(cluster_sizes.values())
-
-        # Merged fill polygons — one trace, separated by None
-        fill_x, fill_y, fill_colors = [], [], []
-        border_x, border_y, border_colors = [], [], []
+        # Group clusters by their enriched-species color so each group can be
+        # drawn as a single merged trace (avoids hundreds of individual traces).
+        # Unenriched clusters share one neutral-gray group.
+        _UNENRICHED_COLOR = '#666677'
+        groups: dict[str, dict] = {}  # hex_color -> {fill_x, fill_y, border_x, border_y}
 
         for cl, points in sorted(cluster_points.items()):
             if len(points) < 3:
@@ -2925,29 +2945,40 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
                 pts = np.array(points)
                 hull = ConvexHull(pts)
                 verts = pts[hull.vertices]
-                r, g, b = _size_to_rgb(len(points), min_sz, max_sz)
                 poly_x = verts[:, 0].tolist() + [verts[0, 0], None]
                 poly_y = verts[:, 1].tolist() + [verts[0, 1], None]
-                fill_x.extend(poly_x)
-                fill_y.extend(poly_y)
-                border_x.extend(poly_x)
-                border_y.extend(poly_y)
-                fill_colors.append(f'rgba({r},{g},{b},0.13)')
-                border_colors.append(f'rgba({r},{g},{b},0.5)')
+
+                enr = _CLUSTER_ENRICHMENT.get(cl, {})
+                hex_color = enr.get('Dominant Color', _UNENRICHED_COLOR) or _UNENRICHED_COLOR
+
+                if hex_color not in groups:
+                    groups[hex_color] = {'fill_x': [], 'fill_y': [], 'bord_x': [], 'bord_y': []}
+                groups[hex_color]['fill_x'].extend(poly_x)
+                groups[hex_color]['fill_y'].extend(poly_y)
+                groups[hex_color]['bord_x'].extend(poly_x)
+                groups[hex_color]['bord_y'].extend(poly_y)
+
                 cx, cy = pts[:, 0].mean(), pts[:, 1].mean()
                 centroid_x.append(cx)
                 centroid_y.append(cy)
                 centroid_cl.append(cl)
-                centroid_colors.append(f'rgba({r},{g},{b},0.9)')
+                centroid_colors.append(hex_color)
+                cluster_name = enr.get('Cluster Name') or f'Cluster {cl}'
+                centroid_labels.append(cluster_name)
             except Exception:
                 pass
 
-        if fill_x:
+        for hex_color, g in groups.items():
+            r_hex = hex_color.lstrip('#')
+            r, gr, b = int(r_hex[0:2], 16), int(r_hex[2:4], 16), int(r_hex[4:6], 16)
+            is_enriched = hex_color != _UNENRICHED_COLOR
+            fill_alpha  = 0.18 if is_enriched else 0.07
+            bord_alpha  = 0.60 if is_enriched else 0.25
             fig.add_trace(go.Scatter(
-                x=fill_x, y=fill_y,
+                x=g['fill_x'], y=g['fill_y'],
                 fill='toself',
-                fillcolor='rgba(80,130,220,0.10)',
-                line=dict(color='rgba(80,130,220,0.35)', width=1),
+                fillcolor=f'rgba({r},{gr},{b},{fill_alpha})',
+                line=dict(color=f'rgba({r},{gr},{b},{bord_alpha})', width=1.5 if is_enriched else 0.8),
                 mode='lines',
                 hoverinfo='skip',
                 showlegend=False,
@@ -2977,8 +3008,15 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
             text += f"Entry: {record['Entry']}<br>"
             if 'Protein names' in record:
                 text += f"Protein: {str(record['Protein names'])[:60]}...<br>"
-            if 'Cluster Label' in record:
-                text += f"Cluster: {record['Cluster Label']}"
+            cl = record.get('Cluster Label')
+            cl_name = record.get('Cluster Name') or (
+                _CLUSTER_ENRICHMENT.get(int(cl), {}).get('Cluster Name', '') if cl is not None else '')
+            if cl is not None:
+                enr = _CLUSTER_ENRICHMENT.get(int(cl) if cl != -1 else -1, {})
+                dominant = enr.get('Dominant Species', '')
+                text += f"Cluster: {cl_name or cl}"
+                if dominant:
+                    text += f" <i>(enriched: {dominant})</i>"
             hover_text.append(text)
         fig.add_trace(go.Scattergl(
             x=[r['UMAP 1 Scaled'] for r in df_records],
@@ -2991,21 +3029,35 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
             hovertemplate='%{text}<extra></extra>',
             customdata=[[r['Entry'], r.get('Cluster Label', -1)] for r in df_records]
         ))
-    # Centroid labels on top of everything — large hit target so clicks land reliably
+    # Centroid labels on top of everything — large hit target so clicks land reliably.
+    # Labels show cluster name; enriched clusters use their species color.
     if centroid_x:
+        centroid_hover = []
+        for cl, label in zip(centroid_cl, centroid_labels):
+            enr = _CLUSTER_ENRICHMENT.get(cl, {})
+            dominant = enr.get('Dominant Species', '')
+            all_enr   = enr.get('All Enriched', '')
+            if dominant:
+                tip = f'<b>{label}</b><br>Enriched: {all_enr}<extra></extra>'
+            else:
+                tip = f'<b>{label}</b> — click to select<extra></extra>'
+            centroid_hover.append(tip)
+
         fig.add_trace(go.Scatter(
             x=centroid_x, y=centroid_y,
             mode='markers+text',
             marker=dict(
                 size=28,
-                color='rgba(255,255,255,0.08)',
-                line=dict(color='rgba(180,200,255,0.35)', width=1),
+                color=[f'rgba(255,255,255,{0.18 if c != "#666677" else 0.04})'
+                       for c in centroid_colors],
+                line=dict(color=centroid_colors, width=[2 if c != '#666677' else 0.5
+                                                        for c in centroid_colors]),
             ),
-            text=[str(c) for c in centroid_cl],
-            textfont=dict(size=9, color=centroid_colors),
+            text=centroid_labels,
+            textfont=dict(size=8, color=centroid_colors),
             textposition='middle center',
             customdata=[[c] for c in centroid_cl],
-            hovertemplate='<b>Cluster %{customdata[0]}</b> — click to select<extra></extra>',
+            hovertemplate=centroid_hover,
             showlegend=False,
         ))
 
