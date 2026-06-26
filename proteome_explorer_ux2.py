@@ -1293,7 +1293,7 @@ app.layout = html.Div([
                              'textTransform': 'uppercase'}),
                 dcc.Graph(
                     id='selection-phylo-tree',
-                    figure=_build_phylo_figure([], height=400),
+                    figure=go.Figure(),
                     config={'displayModeBar': False, 'scrollZoom': False},
                     style={'height': '400px'},
                 ),
