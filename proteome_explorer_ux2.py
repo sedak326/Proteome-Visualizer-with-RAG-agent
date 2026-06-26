@@ -1288,41 +1288,36 @@ app.layout = html.Div([
                 for species, info in SPECIES_DATA.items()
             ], style={'display': 'none'}),
 
-            # Phylogenetic tree + hover preview panel
+            # Phylogenetic tree — full width, with small hover preview as corner overlay
             html.Div([
-                # Tree (left, ~70%)
+                html.P("Click a species to select it — up to 3",
+                       style={'textAlign': 'center', 'color': 'rgba(168,218,220,0.45)',
+                             'fontSize': 10, 'fontFamily': '"JetBrains Mono", monospace',
+                             'letterSpacing': '2px', 'marginBottom': 4,
+                             'textTransform': 'uppercase'}),
                 html.Div([
-                    html.P("Click a species to select · hover to preview · up to 3",
-                           style={'textAlign': 'center', 'color': 'rgba(168,218,220,0.45)',
-                                 'fontSize': 10, 'fontFamily': '"JetBrains Mono", monospace',
-                                 'letterSpacing': '2px', 'marginBottom': 4,
-                                 'textTransform': 'uppercase'}),
                     dcc.Graph(
                         id='selection-phylo-tree',
                         figure=go.Figure(),
                         config={'displayModeBar': False, 'scrollZoom': False},
-                        style={'height': '580px'},
+                        style={'height': '580px', 'width': '100%'},
                     ),
-                ], style={'flex': '1 1 65%', 'minWidth': 0}),
-
-                # Hover preview panel (right, ~30%)
-                html.Div([
-                    html.Div(id='selection-hover-name',
-                             children='Hover an animal',
-                             style={'color': 'rgba(168,218,220,0.4)', 'fontSize': 11,
-                                   'fontFamily': '"JetBrains Mono", monospace',
-                                   'letterSpacing': '2px', 'textTransform': 'uppercase',
-                                   'marginBottom': 16, 'textAlign': 'center'}),
-                    html.Img(id='selection-hover-img', src='',
-                             style={'maxWidth': '100%', 'maxHeight': '260px',
-                                   'objectFit': 'contain', 'display': 'none',
-                                   'borderRadius': 12,
-                                   'filter': 'drop-shadow(0 0 20px rgba(100,255,218,0.3))'}),
-                ], style={'flex': '0 0 28%', 'display': 'flex', 'flexDirection': 'column',
-                         'alignItems': 'center', 'justifyContent': 'center',
-                         'padding': '20px 10px'}),
-            ], style={'display': 'flex', 'alignItems': 'center', 'gap': 16,
-                     'maxWidth': 1100, 'margin': '0 auto 40px auto'}),
+                    # Small image preview — absolute overlay, appears on hover
+                    html.Div([
+                        html.Img(id='selection-hover-img', src='',
+                                 style={'maxWidth': '140px', 'maxHeight': '140px',
+                                       'objectFit': 'contain', 'display': 'none',
+                                       'filter': 'drop-shadow(0 0 16px rgba(100,255,218,0.5))'}),
+                        html.Div(id='selection-hover-name', children='',
+                                 style={'color': 'rgba(168,218,220,0.7)', 'fontSize': 10,
+                                       'fontFamily': '"JetBrains Mono", monospace',
+                                       'letterSpacing': '1px', 'textAlign': 'center',
+                                       'marginTop': 6, 'textTransform': 'uppercase'}),
+                    ], style={'position': 'absolute', 'bottom': 24, 'right': 24,
+                             'display': 'flex', 'flexDirection': 'column',
+                             'alignItems': 'center', 'pointerEvents': 'none'}),
+                ], style={'position': 'relative'}),
+            ], style={'maxWidth': 1000, 'margin': '0 auto 40px auto'}),
 
             html.Div([
                 html.Div([
@@ -4137,26 +4132,17 @@ def update_selection_phylo(selected_species):
 app.clientside_callback(
     """
     function(hoverData) {
-        if (!hoverData || !hoverData.points || !hoverData.points.length) {
-            return ['Hover an animal',
-                    '',
-                    {maxWidth:'100%', maxHeight:'260px', objectFit:'contain',
-                     display:'none', borderRadius:'12px',
-                     filter:'drop-shadow(0 0 20px rgba(100,255,218,0.3))'}];
-        }
+        var hidden = {maxWidth:'140px', maxHeight:'140px', objectFit:'contain',
+                      display:'none',
+                      filter:'drop-shadow(0 0 16px rgba(100,255,218,0.5))'};
+        var shown  = {maxWidth:'140px', maxHeight:'140px', objectFit:'contain',
+                      display:'block',
+                      filter:'drop-shadow(0 0 16px rgba(100,255,218,0.5))'};
+        if (!hoverData || !hoverData.points || !hoverData.points.length)
+            return ['', '', hidden];
         var cd = hoverData.points[0].customdata;
-        if (!cd || !cd[0]) {
-            return ['Hover an animal', '',
-                    {maxWidth:'100%', maxHeight:'260px', objectFit:'contain',
-                     display:'none', borderRadius:'12px',
-                     filter:'drop-shadow(0 0 20px rgba(100,255,218,0.3))'}];
-        }
-        var name = cd[0];
-        var url  = cd[1] || '';
-        return [name, url,
-                {maxWidth:'100%', maxHeight:'260px', objectFit:'contain',
-                 display: url ? 'block' : 'none', borderRadius:'12px',
-                 filter:'drop-shadow(0 0 20px rgba(100,255,218,0.3))'}];
+        if (!cd || !cd[0]) return ['', '', hidden];
+        return [cd[0], cd[1] || '', cd[1] ? shown : hidden];
     }
     """,
     [Output('selection-hover-name', 'children'),
@@ -4175,7 +4161,9 @@ app.clientside_callback(
 def selection_tree_click(click_data, *n_clicks_list):
     if not click_data:
         raise dash.exceptions.PreventUpdate
-    sp_key = click_data['points'][0].get('customdata')
+    cd = click_data['points'][0].get('customdata')
+    # customdata is [sp_key, img_url] — extract just the species key
+    sp_key = cd[0] if isinstance(cd, (list, tuple)) else cd
     if not sp_key or sp_key not in SPECIES_DATA:
         raise dash.exceptions.PreventUpdate
     keys = list(SPECIES_DATA.keys())
