@@ -2949,7 +2949,12 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
                 poly_y = verts[:, 1].tolist() + [verts[0, 1], None]
 
                 enr = _CLUSTER_ENRICHMENT.get(cl, {})
-                hex_color = enr.get('Dominant Color', _UNENRICHED_COLOR) or _UNENRICHED_COLOR
+                dominant_sp = enr.get('Dominant Species', '')
+                # Only highlight enrichment if the dominant species is currently visible
+                if dominant_sp and dominant_sp in active_species:
+                    hex_color = enr.get('Dominant Color', _UNENRICHED_COLOR) or _UNENRICHED_COLOR
+                else:
+                    hex_color = _UNENRICHED_COLOR
 
                 if hex_color not in groups:
                     groups[hex_color] = {'fill_x': [], 'fill_y': [], 'bord_x': [], 'bord_y': []}
@@ -2962,7 +2967,7 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
                 centroid_x.append(cx)
                 centroid_y.append(cy)
                 centroid_cl.append(cl)
-                centroid_colors.append(hex_color)
+                centroid_colors.append(hex_color if dominant_sp in active_species else _UNENRICHED_COLOR)
                 cluster_name = enr.get('Cluster Name') or f'Cluster {cl}'
                 centroid_labels.append(cluster_name)
             except Exception:
@@ -3036,9 +3041,11 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
         for cl, label in zip(centroid_cl, centroid_labels):
             enr = _CLUSTER_ENRICHMENT.get(cl, {})
             dominant = enr.get('Dominant Species', '')
-            all_enr   = enr.get('All Enriched', '')
-            if dominant:
-                tip = f'<b>{label}</b><br>Enriched: {all_enr}<extra></extra>'
+            all_enr_raw = enr.get('All Enriched', '') or ''
+            # Only show enrichment hint for species that are currently visible
+            visible_enriched = [s for s in all_enr_raw.split(', ') if s and s in active_species]
+            if visible_enriched:
+                tip = f'<b>{label}</b><br>Enriched: {", ".join(visible_enriched)}<extra></extra>'
             else:
                 tip = f'<b>{label}</b> — click to select<extra></extra>'
             centroid_hover.append(tip)
