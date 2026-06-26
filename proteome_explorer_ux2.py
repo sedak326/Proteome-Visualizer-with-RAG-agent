@@ -1275,36 +1275,29 @@ app.layout = html.Div([
                              'fontWeight': '300'}),
             ], style={'marginBottom': 20}),
 
+            # Hidden cards kept in DOM so per-species callbacks stay wired
             html.Div([
                 html.Div([
-                    html.Div([
-                        html.Img(src=animal_icons.get(species, ''),
-                                style={'width': '120px', 'height': '120px', 'objectFit': 'contain',
-                                      'marginBottom': 15,
-                                      'transition': 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)'}),
-                        html.H3(info['display_name'],
-                               style={'color': '#f1faee', 'marginBottom': 12, 'fontSize': 15,
-                                     'fontFamily': '"Inter", sans-serif', 'fontWeight': '500'}),
-                        html.Button('Select', id=f'btn-{species}', n_clicks=0,
-                                   style={'padding': '10px 28px', 'fontSize': 11,
-                                         'backgroundColor': 'transparent',
-                                         'color': '#a8dadc',
-                                         'border': '1px solid rgba(168, 218, 220, 0.3)',
-                                         'borderRadius': 25,
-                                         'cursor': 'pointer', 'transition': 'all 0.3s ease',
-                                         'fontWeight': '500', 'fontFamily': '"JetBrains Mono", monospace',
-                                         'letterSpacing': '2px', 'textTransform': 'uppercase'})
-                    ], className='glass-card',
-                       style={'padding': 25, 'textAlign': 'center',
-                             'background': 'rgba(255, 255, 255, 0.03)',
-                             'backdropFilter': 'blur(10px)',
-                             'border': '1px solid rgba(255, 255, 255, 0.1)',
-                             'borderRadius': 16},
-                       id=f'card-{species}')
-                ], style={'width': '18%', 'display': 'inline-block', 'margin': '1%',
-                         'verticalAlign': 'top'})
+                    html.Button('', id=f'btn-{species}', n_clicks=0,
+                               style={'display': 'none'})
+                ], id=f'card-{species}', style={'display': 'none'})
                 for species, info in SPECIES_DATA.items()
-            ], style={'textAlign': 'center', 'marginBottom': 60}),
+            ], style={'display': 'none'}),
+
+            # Phylogenetic tree as the primary species selection UI
+            html.Div([
+                html.P("Click a species to select it — up to 3",
+                       style={'textAlign': 'center', 'color': 'rgba(168,218,220,0.5)',
+                             'fontSize': 11, 'fontFamily': '"JetBrains Mono", monospace',
+                             'letterSpacing': '2px', 'marginBottom': 4,
+                             'textTransform': 'uppercase'}),
+                dcc.Graph(
+                    id='selection-phylo-tree',
+                    figure=_build_phylo_figure([], height=400),
+                    config={'displayModeBar': False, 'scrollZoom': False},
+                    style={'height': '400px'},
+                ),
+            ], style={'maxWidth': 680, 'margin': '0 auto 40px auto'}),
 
             html.Div([
                 html.Div([
@@ -3744,7 +3737,7 @@ def process_chat_query(pending_query, chat_history, active_species, selected_dat
 
 # ── Phylogenetic tree panel ────────────────────────────────────────────────────
 
-def _build_phylo_figure(active_species):
+def _build_phylo_figure(active_species, height=220):
     """Return a Plotly figure of the 10-taxon mammal tree, with active species highlighted."""
     import plotly.graph_objects as go
 
@@ -3905,7 +3898,7 @@ def _build_phylo_figure(active_species):
         showlegend=False,
         hovermode='closest',
         font=dict(family='JetBrains Mono, monospace', color=LABEL_CLR),
-        height=220,
+        height=height,
     )
     return fig
 
@@ -3950,6 +3943,35 @@ def phylo_click_toggle(click_data, active_species):
     else:
         active.append(sp_key)
     return active
+
+
+# ── Selection-screen phylo tree ────────────────────────────────────────────────
+
+@app.callback(
+    Output('selection-phylo-tree', 'figure'),
+    Input('selected-species-store', 'data'),
+)
+def update_selection_phylo(selected_species):
+    return _build_phylo_figure(selected_species or [], height=400)
+
+
+@app.callback(
+    [Output(f'btn-{sp}', 'n_clicks') for sp in SPECIES_DATA.keys()],
+    Input('selection-phylo-tree', 'clickData'),
+    [State(f'btn-{sp}', 'n_clicks') for sp in SPECIES_DATA.keys()],
+    prevent_initial_call=True,
+)
+def selection_tree_click(click_data, *n_clicks_list):
+    if not click_data:
+        raise dash.exceptions.PreventUpdate
+    sp_key = click_data['points'][0].get('customdata')
+    if not sp_key or sp_key not in SPECIES_DATA:
+        raise dash.exceptions.PreventUpdate
+    keys = list(SPECIES_DATA.keys())
+    counts = list(n_clicks_list)
+    idx = keys.index(sp_key)
+    counts[idx] = (counts[idx] or 0) + 1
+    return counts
 
 
 server = app.server
