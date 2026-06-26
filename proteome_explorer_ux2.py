@@ -3768,8 +3768,7 @@ def _build_selection_phylo_figure(active_species):
     Tool species show their animal image at the leaf; non-tool species get a dim dot.
     Hover customdata = [sp_key, '/animal_pics/<file>'] for clientside preview.
     """
-    BG     = '#08111f'
-    BRANCH = 'rgba(100,255,218,0.30)'
+    BRANCH = 'rgba(100,255,218,0.65)'
 
     TOOL_KEYS = {k: SPECIES_DATA[k]['color'] for k in SPECIES_DATA}
     active_set = set(active_species or [])
@@ -3853,19 +3852,7 @@ def _build_selection_phylo_figure(active_species):
                 xanchor='left', yanchor='middle',
                 sizing='contain',
                 opacity=opacity,
-                layer='above',
-            ))
-
-            # Name below image
-            annots.append(dict(
-                x=IMG_CENTER, y=y - IMG_H / 2 - 0.06,
-                text=f"<b>{label}</b>" if is_active else label,
-                font=dict(
-                    size=10 if is_active else 9,
-                    color=color if is_active else 'rgba(168,218,220,0.45)',
-                    family='JetBrains Mono, monospace',
-                ),
-                showarrow=False, xanchor='center', yanchor='top',
+                layer='below',  # below traces so invisible markers sit on top and catch clicks
             ))
 
             # Invisible large marker for hover/click detection
@@ -3875,16 +3862,16 @@ def _build_selection_phylo_figure(active_species):
             node_size.append(60)
             node_custom.append([sp_key, img_url])
         else:
-            # Non-tool: small dim dot + text label
+            # Non-tool: small dim dot + italic label
             node_x.append(LEAF_X)
             node_y.append(y)
-            node_color.append('rgba(100,255,218,0.15)')
-            node_size.append(5)
+            node_color.append('rgba(100,255,218,0.20)')
+            node_size.append(7)
             node_custom.append([None, None])
             annots.append(dict(
-                x=LEAF_X + 0.15, y=y,
-                text=label,
-                font=dict(size=8, color='rgba(168,218,220,0.25)', family='JetBrains Mono, monospace'),
+                x=LEAF_X + 0.18, y=y,
+                text=f'<i>{label}</i>',
+                font=dict(size=9, color='rgba(168,218,220,0.35)', family='Inter, sans-serif'),
                 showarrow=False, xanchor='left', yanchor='middle',
             ))
 
@@ -3904,7 +3891,7 @@ def _build_selection_phylo_figure(active_species):
     node_trace = go.Scatter(
         x=node_x, y=node_y,
         mode='markers',
-        marker=dict(color=node_color, size=node_size, opacity=0),
+        marker=dict(color=node_color, size=node_size, opacity=0.01),
         customdata=node_custom,
         hovertemplate='%{customdata[0]}<extra></extra>',
         showlegend=False,
@@ -3915,8 +3902,8 @@ def _build_selection_phylo_figure(active_species):
         shapes=shapes,
         annotations=annots,
         images=layout_images,
-        paper_bgcolor=BG,
-        plot_bgcolor=BG,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=10, r=20, t=20, b=20),
         xaxis=dict(visible=False, range=[-0.2, IMG_LEFT + IMG_W + 0.3]),
         yaxis=dict(visible=False, range=[-0.9, 9.9]),
