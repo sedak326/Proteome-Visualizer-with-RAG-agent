@@ -972,6 +972,10 @@ from flask import send_from_directory
 def serve_animation(filename):
     return send_from_directory(str(PRERENDERED_DIR), filename)
 
+@app.server.route('/animal_pics/<path:filename>')
+def serve_animal_pic(filename):
+    return send_from_directory(str(BASE_DIR / 'animal_pics'), filename)
+
 
 
 # Ocean theme CSS with waves, particles, and glassmorphism
@@ -1284,20 +1288,41 @@ app.layout = html.Div([
                 for species, info in SPECIES_DATA.items()
             ], style={'display': 'none'}),
 
-            # Phylogenetic tree as the primary species selection UI
+            # Phylogenetic tree + hover preview panel
             html.Div([
-                html.P("Click a species to select it — up to 3",
-                       style={'textAlign': 'center', 'color': 'rgba(168,218,220,0.5)',
-                             'fontSize': 11, 'fontFamily': '"JetBrains Mono", monospace',
-                             'letterSpacing': '2px', 'marginBottom': 4,
-                             'textTransform': 'uppercase'}),
-                dcc.Graph(
-                    id='selection-phylo-tree',
-                    figure=go.Figure(),
-                    config={'displayModeBar': False, 'scrollZoom': False},
-                    style={'height': '400px'},
-                ),
-            ], style={'maxWidth': 680, 'margin': '0 auto 40px auto'}),
+                # Tree (left, ~70%)
+                html.Div([
+                    html.P("Click a species to select · hover to preview · up to 3",
+                           style={'textAlign': 'center', 'color': 'rgba(168,218,220,0.45)',
+                                 'fontSize': 10, 'fontFamily': '"JetBrains Mono", monospace',
+                                 'letterSpacing': '2px', 'marginBottom': 4,
+                                 'textTransform': 'uppercase'}),
+                    dcc.Graph(
+                        id='selection-phylo-tree',
+                        figure=go.Figure(),
+                        config={'displayModeBar': False, 'scrollZoom': False},
+                        style={'height': '580px'},
+                    ),
+                ], style={'flex': '1 1 65%', 'minWidth': 0}),
+
+                # Hover preview panel (right, ~30%)
+                html.Div([
+                    html.Div(id='selection-hover-name',
+                             children='Hover an animal',
+                             style={'color': 'rgba(168,218,220,0.4)', 'fontSize': 11,
+                                   'fontFamily': '"JetBrains Mono", monospace',
+                                   'letterSpacing': '2px', 'textTransform': 'uppercase',
+                                   'marginBottom': 16, 'textAlign': 'center'}),
+                    html.Img(id='selection-hover-img', src='',
+                             style={'maxWidth': '100%', 'maxHeight': '260px',
+                                   'objectFit': 'contain', 'display': 'none',
+                                   'borderRadius': 12,
+                                   'filter': 'drop-shadow(0 0 20px rgba(100,255,218,0.3))'}),
+                ], style={'flex': '0 0 28%', 'display': 'flex', 'flexDirection': 'column',
+                         'alignItems': 'center', 'justifyContent': 'center',
+                         'padding': '20px 10px'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': 16,
+                     'maxWidth': 1100, 'margin': '0 auto 40px auto'}),
 
             html.Div([
                 html.Div([
@@ -3737,6 +3762,172 @@ def process_chat_query(pending_query, chat_history, active_species, selected_dat
 
 # ── Phylogenetic tree panel ────────────────────────────────────────────────────
 
+def _build_selection_phylo_figure(active_species):
+    """
+    Full-page phylo tree for the species-selection screen.
+    Tool species show their animal image at the leaf; non-tool species get a dim dot.
+    Hover customdata = [sp_key, '/animal_pics/<file>'] for clientside preview.
+    """
+    BG     = '#08111f'
+    BRANCH = 'rgba(100,255,218,0.30)'
+
+    TOOL_KEYS = {k: SPECIES_DATA[k]['color'] for k in SPECIES_DATA}
+    active_set = set(active_species or [])
+
+    LEAVES = [
+        ('human',      9.0, 'Human',               False, None),
+        ('hippo',      8.0, 'Hippopotamus',         True,  'Hippopotamus'),
+        ('graywhale',  7.0, 'Gray Whale',           True,  'Gray Whale'),
+        ('spermwhale', 6.0, 'Sperm Whale',          False, None),
+        ('orca',       5.0, 'Orca',                 True,  'Orca'),
+        ('bottlenose', 4.0, 'Bottlenose Dolphin',   True,  'Bottlenose Dolphin'),
+        ('polarbear',  3.0, 'Polar Bear',           True,  'Polar Bear'),
+        ('walrus',     2.0, 'Walrus',               False, None),
+        ('harborseal', 1.0, 'Harbor Seal',          True,  'Harbor Seal'),
+        ('sealion',    0.0, 'Sea Lion',             True,  'Sea Lion'),
+    ]
+
+    # Same tree geometry as _build_phylo_figure
+    LEAF_X = 5.8
+    X_ROOT, X_LAUR = 0.60, 1.60
+    X_CETARTIO, X_CET, X_ODONT, X_DELPH = 2.75, 3.95, 5.10, 5.55
+    X_CARN, X_PINN, X_PHOC_OTA = 2.75, 3.95, 5.10
+
+    y_delph    = 4.5
+    y_odont    = (6.0 + y_delph) / 2
+    y_cet      = (7.0 + y_odont) / 2
+    y_cetartio = (8.0 + y_cet)   / 2
+    y_phoc_ota = 0.5
+    y_pinn     = (2.0 + y_phoc_ota) / 2
+    y_carn     = (3.0 + y_pinn)     / 2
+    y_laur     = (y_cetartio + y_carn) / 2
+    y_root     = (9.0 + y_laur) / 2
+
+    segs = [
+        (X_ROOT, y_laur, X_ROOT, 9.0), (X_ROOT, 9.0, LEAF_X, 9.0),
+        (X_ROOT, y_laur, X_LAUR, y_laur),
+        (X_LAUR, y_carn, X_LAUR, y_cetartio),
+        (X_LAUR, y_cetartio, X_CETARTIO, y_cetartio),
+        (X_LAUR, y_carn, X_CARN, y_carn),
+        (X_CETARTIO, y_cet, X_CETARTIO, 8.0),
+        (X_CETARTIO, 8.0, LEAF_X, 8.0),
+        (X_CETARTIO, y_cet, X_CET, y_cet),
+        (X_CET, y_odont, X_CET, 7.0), (X_CET, 7.0, LEAF_X, 7.0),
+        (X_CET, y_odont, X_ODONT, y_odont),
+        (X_ODONT, y_delph, X_ODONT, 6.0), (X_ODONT, 6.0, LEAF_X, 6.0),
+        (X_ODONT, y_delph, X_DELPH, y_delph),
+        (X_DELPH, 4.0, X_DELPH, 5.0), (X_DELPH, 5.0, LEAF_X, 5.0), (X_DELPH, 4.0, LEAF_X, 4.0),
+        (X_CARN, y_pinn, X_CARN, 3.0), (X_CARN, 3.0, LEAF_X, 3.0),
+        (X_CARN, y_pinn, X_PINN, y_pinn),
+        (X_PINN, y_phoc_ota, X_PINN, 2.0), (X_PINN, 2.0, LEAF_X, 2.0),
+        (X_PINN, y_phoc_ota, X_PHOC_OTA, y_phoc_ota),
+        (X_PHOC_OTA, 0.0, X_PHOC_OTA, 1.0),
+        (X_PHOC_OTA, 1.0, LEAF_X, 1.0), (X_PHOC_OTA, 0.0, LEAF_X, 0.0),
+    ]
+    shapes = [dict(type='line', x0=x0, y0=y0, x1=x1, y1=y1,
+                   line=dict(color=BRANCH, width=2)) for x0,y0,x1,y1 in segs]
+
+    # Animal images placed to the right of LEAF_X
+    IMG_LEFT   = LEAF_X + 0.15   # left anchor x
+    IMG_W      = 2.4              # sizex (data coords)
+    IMG_H      = 0.82             # sizey (data coords, < 1.0 leaf spacing)
+    IMG_CENTER = IMG_LEFT + IMG_W / 2
+
+    layout_images = []
+    annots = []
+    node_x, node_y, node_color, node_size, node_custom = [], [], [], [], []
+
+    for key, y, label, is_tool, sp_key in LEAVES:
+        if is_tool and sp_key:
+            is_active = sp_key in active_set
+            img_file  = Path(SPECIES_DATA[sp_key]['image']).name
+            img_url   = f'/animal_pics/{img_file}'
+            color     = TOOL_KEYS[sp_key]
+            opacity   = 1.0 if is_active else 0.38
+
+            layout_images.append(dict(
+                source=img_url,
+                x=IMG_LEFT, y=y,
+                xref='x', yref='y',
+                sizex=IMG_W, sizey=IMG_H,
+                xanchor='left', yanchor='middle',
+                sizing='contain',
+                opacity=opacity,
+                layer='above',
+            ))
+
+            # Name below image
+            annots.append(dict(
+                x=IMG_CENTER, y=y - IMG_H / 2 - 0.06,
+                text=f"<b>{label}</b>" if is_active else label,
+                font=dict(
+                    size=10 if is_active else 9,
+                    color=color if is_active else 'rgba(168,218,220,0.45)',
+                    family='JetBrains Mono, monospace',
+                ),
+                showarrow=False, xanchor='center', yanchor='top',
+            ))
+
+            # Invisible large marker for hover/click detection
+            node_x.append(IMG_CENTER)
+            node_y.append(y)
+            node_color.append(color)
+            node_size.append(60)
+            node_custom.append([sp_key, img_url])
+        else:
+            # Non-tool: small dim dot + text label
+            node_x.append(LEAF_X)
+            node_y.append(y)
+            node_color.append('rgba(100,255,218,0.15)')
+            node_size.append(5)
+            node_custom.append([None, None])
+            annots.append(dict(
+                x=LEAF_X + 0.15, y=y,
+                text=label,
+                font=dict(size=8, color='rgba(168,218,220,0.25)', family='JetBrains Mono, monospace'),
+                showarrow=False, xanchor='left', yanchor='middle',
+            ))
+
+    # Clade labels
+    for cx, cy, txt in [
+        (X_CET + 0.05,      y_cet + 0.12,      '<i>Cetacea</i>'),
+        (X_PINN + 0.05,     y_pinn + 0.12,     '<i>Pinnipedia</i>'),
+        (X_CETARTIO + 0.05, y_cetartio + 0.12, '<i>Cetartiodactyla</i>'),
+        (X_CARN + 0.05,     y_carn + 0.12,     '<i>Carnivora</i>'),
+    ]:
+        annots.append(dict(
+            x=cx, y=cy, text=txt,
+            font=dict(size=9, color='rgba(100,255,218,0.55)', family='Inter, sans-serif'),
+            showarrow=False, xanchor='left',
+        ))
+
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers',
+        marker=dict(color=node_color, size=node_size, opacity=0),
+        customdata=node_custom,
+        hovertemplate='%{customdata[0]}<extra></extra>',
+        showlegend=False,
+    )
+
+    fig = go.Figure(data=[node_trace])
+    fig.update_layout(
+        shapes=shapes,
+        annotations=annots,
+        images=layout_images,
+        paper_bgcolor=BG,
+        plot_bgcolor=BG,
+        margin=dict(l=10, r=20, t=20, b=20),
+        xaxis=dict(visible=False, range=[-0.2, IMG_LEFT + IMG_W + 0.3]),
+        yaxis=dict(visible=False, range=[-0.9, 9.9]),
+        showlegend=False,
+        hovermode='closest',
+        height=580,
+        dragmode=False,
+    )
+    return fig
+
+
 def _build_phylo_figure(active_species, height=220):
     """Return a Plotly figure of the 10-taxon mammal tree, with active species highlighted."""
     import plotly.graph_objects as go
@@ -3952,7 +4143,40 @@ def phylo_click_toggle(click_data, active_species):
     Input('selected-species-store', 'data'),
 )
 def update_selection_phylo(selected_species):
-    return _build_phylo_figure(selected_species or [], height=400)
+    return _build_selection_phylo_figure(selected_species or [])
+
+
+# Clientside: hover on tree → update preview image (zero server round-trip)
+app.clientside_callback(
+    """
+    function(hoverData) {
+        if (!hoverData || !hoverData.points || !hoverData.points.length) {
+            return ['Hover an animal',
+                    '',
+                    {maxWidth:'100%', maxHeight:'260px', objectFit:'contain',
+                     display:'none', borderRadius:'12px',
+                     filter:'drop-shadow(0 0 20px rgba(100,255,218,0.3))'}];
+        }
+        var cd = hoverData.points[0].customdata;
+        if (!cd || !cd[0]) {
+            return ['Hover an animal', '',
+                    {maxWidth:'100%', maxHeight:'260px', objectFit:'contain',
+                     display:'none', borderRadius:'12px',
+                     filter:'drop-shadow(0 0 20px rgba(100,255,218,0.3))'}];
+        }
+        var name = cd[0];
+        var url  = cd[1] || '';
+        return [name, url,
+                {maxWidth:'100%', maxHeight:'260px', objectFit:'contain',
+                 display: url ? 'block' : 'none', borderRadius:'12px',
+                 filter:'drop-shadow(0 0 20px rgba(100,255,218,0.3))'}];
+    }
+    """,
+    [Output('selection-hover-name', 'children'),
+     Output('selection-hover-img',  'src'),
+     Output('selection-hover-img',  'style')],
+    Input('selection-phylo-tree', 'hoverData'),
+)
 
 
 @app.callback(
