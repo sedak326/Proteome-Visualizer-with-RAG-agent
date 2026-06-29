@@ -490,7 +490,7 @@ def query_rag(query_text, visual_context=""):
             "Most clusters (350/370) contain proteins from all 7 species, reflecting deep shared evolutionary heritage.\n\n"
             "Visualisation colours: each species has a fixed colour — "
             "California Sea Lion: red (#E6194B), Bottlenose Dolphin: blue (#4363D8), "
-            "Gray Whale: green (#3CB44B), Orca: magenta (#F032E6), Harbor Seal: brown (#9A6324), "
+            "Gray Whale: green (#3CB44B), Orca: magenta (#F032E6), Harbor Seal: yellow (#FFE135),"
             "Polar Bear: cyan (#46F0F0), Hippopotamus: orange (#F58231). "
             "Each dot in the UMAP represents one protein from one species. "
             "Cluster hulls (convex boundaries around clusters) are coloured by enriched species: "
@@ -671,8 +671,8 @@ SPECIES_DATA = {
     'Harbor Seal': {
         'csv': str(BASE_DIR / 'umap_output/Harborseal_umap.csv'),
         'image': str(BASE_DIR / 'animal_pics/harbor_seal.png'),
-        'color': '#9A6324',
-        'glow': 'rgba(154, 99, 36, 0.4)',
+        'color': '#FFE135',
+        'glow': 'rgba(255, 225, 53, 0.4)',
         'display_name': 'Harbor Seal',
         'key': 'harborseal'
     },
@@ -704,6 +704,7 @@ def _load_cluster_enrichment():
     if not path.exists():
         return {}
     df = pd.read_csv(path)
+    df = df.fillna('')  # empty cells load as float NaN; downstream code expects strings
     return df.set_index('Cluster Label').to_dict('index')
 
 _CLUSTER_ENRICHMENT: dict = _load_cluster_enrichment()
@@ -1279,45 +1280,64 @@ app.layout = html.Div([
                              'fontWeight': '300'}),
             ], style={'marginBottom': 20}),
 
-            # Hidden cards kept in DOM so per-species callbacks stay wired
+            # Species cards — primary selection UI
             html.Div([
                 html.Div([
-                    html.Button('', id=f'btn-{species}', n_clicks=0,
-                               style={'display': 'none'})
-                ], id=f'card-{species}', style={'display': 'none'})
-                for species, info in SPECIES_DATA.items()
-            ], style={'display': 'none'}),
-
-            # Phylogenetic tree — full width, with small hover preview as corner overlay
-            html.Div([
-                html.P("Click a species to select it — up to 3",
-                       style={'textAlign': 'center', 'color': 'rgba(168,218,220,0.45)',
-                             'fontSize': 10, 'fontFamily': '"JetBrains Mono", monospace',
-                             'letterSpacing': '2px', 'marginBottom': 4,
-                             'textTransform': 'uppercase'}),
-                html.Div([
-                    dcc.Graph(
-                        id='selection-phylo-tree',
-                        figure=go.Figure(),
-                        config={'displayModeBar': False, 'scrollZoom': False},
-                        style={'height': '580px', 'width': '100%'},
-                    ),
-                    # Small image preview — absolute overlay, appears on hover
                     html.Div([
-                        html.Img(id='selection-hover-img', src='',
-                                 style={'maxWidth': '140px', 'maxHeight': '140px',
-                                       'objectFit': 'contain', 'display': 'none',
-                                       'filter': 'drop-shadow(0 0 16px rgba(100,255,218,0.5))'}),
-                        html.Div(id='selection-hover-name', children='',
-                                 style={'color': 'rgba(168,218,220,0.7)', 'fontSize': 10,
-                                       'fontFamily': '"JetBrains Mono", monospace',
-                                       'letterSpacing': '1px', 'textAlign': 'center',
-                                       'marginTop': 6, 'textTransform': 'uppercase'}),
-                    ], style={'position': 'absolute', 'bottom': 24, 'right': 24,
-                             'display': 'flex', 'flexDirection': 'column',
-                             'alignItems': 'center', 'pointerEvents': 'none'}),
-                ], style={'position': 'relative'}),
-            ], style={'maxWidth': 1000, 'margin': '0 auto 40px auto'}),
+                        html.Img(
+                            src=f'/animal_pics/{Path(info["image"]).name}',
+                            style={'width': '100px', 'height': '100px',
+                                  'objectFit': 'contain', 'marginBottom': 12,
+                                  'transition': 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)'}
+                        ),
+                        html.H3(info['display_name'],
+                               style={'color': '#f1faee', 'marginBottom': 10,
+                                     'fontSize': 13, 'fontFamily': '"Inter", sans-serif',
+                                     'fontWeight': '500'}),
+                        html.Button('Select', id=f'btn-{species}', n_clicks=0,
+                                   style={'padding': '8px 22px', 'fontSize': 10,
+                                         'backgroundColor': 'transparent',
+                                         'color': '#a8dadc',
+                                         'border': '1px solid rgba(168, 218, 220, 0.3)',
+                                         'borderRadius': 25, 'cursor': 'pointer',
+                                         'transition': 'all 0.3s ease',
+                                         'fontWeight': '500',
+                                         'fontFamily': '"JetBrains Mono", monospace',
+                                         'letterSpacing': '2px',
+                                         'textTransform': 'uppercase'})
+                    ], className='glass-card',
+                       style={'padding': 20, 'textAlign': 'center',
+                             'background': 'rgba(255, 255, 255, 0.03)',
+                             'backdropFilter': 'blur(10px)',
+                             'border': '1px solid rgba(255, 255, 255, 0.1)',
+                             'borderRadius': 16,
+                             'transition': 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)'},
+                       id=f'card-{species}')
+                ], style={'width': '13%', 'display': 'inline-block',
+                         'margin': '0.5%', 'verticalAlign': 'top'})
+                for species, info in SPECIES_DATA.items()
+            ], style={'textAlign': 'center', 'marginBottom': 24}),
+
+            # Compact phylogenetic reference tree
+            html.Div([
+                html.P("Evolutionary relationships",
+                       style={'textAlign': 'center', 'color': 'rgba(168,218,220,0.3)',
+                             'fontSize': 9, 'fontFamily': '"JetBrains Mono", monospace',
+                             'letterSpacing': '2px', 'marginBottom': 0,
+                             'textTransform': 'uppercase'}),
+                dcc.Graph(
+                    id='selection-phylo-tree',
+                    figure=go.Figure(),
+                    config={'displayModeBar': False, 'scrollZoom': False},
+                    style={'height': '200px'},
+                ),
+            ], style={'maxWidth': 680, 'margin': '0 auto 24px auto'}),
+
+            # Hidden elements required by hover clientside callback
+            html.Div([
+                html.Img(id='selection-hover-img', src='', style={'display': 'none'}),
+                html.Div(id='selection-hover-name', children='', style={'display': 'none'}),
+            ], style={'display': 'none'}),
 
             html.Div([
                 html.Div([
@@ -1706,56 +1726,68 @@ def _compute_filter_tags(species_data_list):
 
 # ============= CALLBACKS =============
 
+# Card button click → add/remove from selection store
+for species in SPECIES_DATA.keys():
+    @app.callback(
+        Output('selected-species-store', 'data', allow_duplicate=True),
+        Input(f'btn-{species}', 'n_clicks'),
+        State('selected-species-store', 'data'),
+        prevent_initial_call=True,
+    )
+    def card_click(n_clicks, current, sp=species):
+        if not n_clicks:
+            raise dash.exceptions.PreventUpdate
+        current = list(current or [])
+        if sp in current:
+            current.remove(sp)
+        elif len(current) < 3:
+            current.append(sp)
+        return current
+
+# Store → card visual state (store is single source of truth)
 for species in SPECIES_DATA.keys():
     @app.callback(
         [Output(f'card-{species}', 'style'),
          Output(f'btn-{species}', 'children'),
          Output(f'btn-{species}', 'style')],
-        [Input(f'btn-{species}', 'n_clicks')],
-        prevent_initial_call=True
+        Input('selected-species-store', 'data'),
     )
-    def toggle_species(n_clicks, species=species):
-        selected = n_clicks % 2 == 1
-        species_color = SPECIES_DATA[species]["color"]
-        species_glow = SPECIES_DATA[species].get("glow", "rgba(100, 255, 218, 0.3)")
-
+    def update_card_visual(selected, sp=species):
+        selected = selected or []
+        is_sel = sp in selected
+        color = SPECIES_DATA[sp]['color']
+        glow  = SPECIES_DATA[sp].get('glow', 'rgba(100, 255, 218, 0.3)')
         card_style = {
-            'padding': 25, 'textAlign': 'center',
+            'padding': 20, 'textAlign': 'center',
             'transition': 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
-            'background': 'rgba(255, 255, 255, 0.08)' if selected else 'rgba(255, 255, 255, 0.03)',
+            'background': 'rgba(255, 255, 255, 0.08)' if is_sel else 'rgba(255, 255, 255, 0.03)',
             'backdropFilter': 'blur(10px)',
-            'border': f'1px solid {species_color}' if selected else '1px solid rgba(255, 255, 255, 0.1)',
+            'border': f'1px solid {color}' if is_sel else '1px solid rgba(255, 255, 255, 0.1)',
             'borderRadius': 16,
-            'boxShadow': f'0 8px 32px {species_glow}, 0 0 20px {species_glow}' if selected else '0 8px 32px rgba(0, 0, 0, 0.2)',
-            'transform': 'translateY(-6px) scale(1.02)' if selected else 'translateY(0) scale(1)'
+            'boxShadow': f'0 8px 32px {glow}, 0 0 20px {glow}' if is_sel else '0 8px 32px rgba(0, 0, 0, 0.2)',
+            'transform': 'translateY(-6px) scale(1.02)' if is_sel else 'translateY(0) scale(1)',
         }
-
-        btn_text = 'Selected' if selected else 'Select'
+        btn_text = 'Selected' if is_sel else 'Select'
         btn_style = {
-            'padding': '10px 28px', 'fontSize': 11,
-            'backgroundColor': species_color if selected else 'transparent',
-            'color': '#0a192f' if selected else '#a8dadc',
-            'border': f'1px solid {species_color}',
+            'padding': '8px 22px', 'fontSize': 10,
+            'backgroundColor': color if is_sel else 'transparent',
+            'color': '#0a192f' if is_sel else '#a8dadc',
+            'border': f'1px solid {color}',
             'borderRadius': 25, 'cursor': 'pointer',
             'transition': 'all 0.3s ease', 'fontWeight': '500',
             'fontFamily': '"JetBrains Mono", monospace',
-            'letterSpacing': '2px', 'textTransform': 'uppercase'
+            'letterSpacing': '2px', 'textTransform': 'uppercase',
         }
-
         return card_style, btn_text, btn_style
 
 @app.callback(
     [Output('selected-species-display', 'children'),
-     Output('selected-species-store', 'data'),
      Output('view-button', 'disabled'),
      Output('view-button', 'style')],
-    [Input(f'btn-{species}', 'n_clicks') for species in SPECIES_DATA.keys()]
+    Input('selected-species-store', 'data'),
 )
-def update_selected_display(*n_clicks_list):
-    selected = [species for species, clicks in zip(SPECIES_DATA.keys(), n_clicks_list)
-                if clicks and clicks % 2 == 1]
-
-    MAX_SPECIES = 3
+def update_selected_display(selected):
+    selected = selected or []
 
     if not selected:
         display = "No organisms selected"
@@ -1765,34 +1797,6 @@ def update_selected_display(*n_clicks_list):
             'backgroundColor': 'rgba(100, 100, 100, 0.1)',
             'color': '#457b9d',
             'border': '1px solid rgba(100, 100, 100, 0.2)',
-            'borderRadius': 30,
-            'cursor': 'not-allowed', 'fontWeight': '500',
-            'transition': 'all 0.3s ease',
-            'fontFamily': '"JetBrains Mono", monospace',
-            'letterSpacing': '2px',
-            'textTransform': 'uppercase'
-        }
-    elif len(selected) > MAX_SPECIES:
-        display = html.Div([
-            html.Div([
-                html.Span([
-                    html.Span("●", style={'marginRight': 8, 'fontSize': 10}),
-                    f"{SPECIES_DATA[species]['display_name']}"
-                ], style={'color': SPECIES_DATA[species]['color'],
-                         'fontWeight': '500', 'marginRight': 20, 'fontSize': 15,
-                         'fontFamily': '"Inter", sans-serif'})
-                for species in selected
-            ]),
-            html.Div(f"Maximum {MAX_SPECIES} species — please deselect {len(selected) - MAX_SPECIES}",
-                     style={'color': '#ff6b6b', 'fontSize': 12, 'marginTop': 8,
-                            'fontFamily': '"JetBrains Mono", monospace'})
-        ])
-        disabled = True
-        btn_style = {
-            'padding': '16px 48px', 'fontSize': 13,
-            'backgroundColor': 'rgba(100, 100, 100, 0.1)',
-            'color': '#457b9d',
-            'border': '1px solid rgba(255, 107, 107, 0.4)',
             'borderRadius': 30,
             'cursor': 'not-allowed', 'fontWeight': '500',
             'transition': 'all 0.3s ease',
@@ -1826,7 +1830,7 @@ def update_selected_display(*n_clicks_list):
             'textTransform': 'uppercase'
         }
 
-    return display, selected, disabled, btn_style
+    return display, disabled, btn_style
 
 @app.callback(
     [Output('selection-screen', 'style'),
@@ -3883,10 +3887,13 @@ def _build_selection_phylo_figure(active_species):
             showarrow=False, xanchor='left',
         ))
 
+    # Markers are near-transparent but must NOT be opacity=0 — Plotly needs
+    # a visible SVG element to fire clickData. Also dragmode must not be False
+    # (which disables all mouse handlers including clicks).
     node_trace = go.Scatter(
         x=node_x, y=node_y,
         mode='markers',
-        marker=dict(color=node_color, size=node_size, opacity=0.01),
+        marker=dict(color=node_color, size=node_size, opacity=0.06),
         customdata=node_custom,
         hovertemplate='%{customdata[0]}<extra></extra>',
         showlegend=False,
@@ -3904,8 +3911,9 @@ def _build_selection_phylo_figure(active_species):
         yaxis=dict(visible=False, range=[-0.9, 9.9]),
         showlegend=False,
         hovermode='closest',
+        clickmode='event',
         height=580,
-        dragmode=False,
+        dragmode='pan',
     )
     return fig
 
@@ -4125,7 +4133,11 @@ def phylo_click_toggle(click_data, active_species):
     Input('selected-species-store', 'data'),
 )
 def update_selection_phylo(selected_species):
-    return _build_selection_phylo_figure(selected_species or [])
+    fig = _build_phylo_figure(selected_species or [], height=200)
+    fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+    for shape in fig.layout.shapes:
+        shape.line.color = 'rgba(100,255,218,0.55)'
+    return fig
 
 
 # Clientside: hover on tree → update preview image (zero server round-trip)
@@ -4153,24 +4165,24 @@ app.clientside_callback(
 
 
 @app.callback(
-    [Output(f'btn-{sp}', 'n_clicks') for sp in SPECIES_DATA.keys()],
+    Output('selected-species-store', 'data', allow_duplicate=True),
     Input('selection-phylo-tree', 'clickData'),
-    [State(f'btn-{sp}', 'n_clicks') for sp in SPECIES_DATA.keys()],
+    State('selected-species-store', 'data'),
     prevent_initial_call=True,
 )
-def selection_tree_click(click_data, *n_clicks_list):
+def selection_tree_click(click_data, current_selection):
     if not click_data:
         raise dash.exceptions.PreventUpdate
     cd = click_data['points'][0].get('customdata')
-    # customdata is [sp_key, img_url] — extract just the species key
     sp_key = cd[0] if isinstance(cd, (list, tuple)) else cd
     if not sp_key or sp_key not in SPECIES_DATA:
         raise dash.exceptions.PreventUpdate
-    keys = list(SPECIES_DATA.keys())
-    counts = list(n_clicks_list)
-    idx = keys.index(sp_key)
-    counts[idx] = (counts[idx] or 0) + 1
-    return counts
+    current = list(current_selection or [])
+    if sp_key in current:
+        current.remove(sp_key)          # second click deselects
+    elif len(current) < 3:
+        current.append(sp_key)          # add up to 3
+    return current
 
 
 server = app.server
