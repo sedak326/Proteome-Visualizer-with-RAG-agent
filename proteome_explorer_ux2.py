@@ -3068,11 +3068,15 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
     # Compute dynamic enrichment once — used for hull coloring AND protein filter.
     _enr_cache_key = (tuple(sorted(active_species or [])), enrichment_mode or 'species')
     if _enr_cache_key not in _ENRICHMENT_CACHE:
-        _ENRICHMENT_CACHE[_enr_cache_key] = {
-            str(k): v for k, v in _run_dynamic_enrichment(
-                active_species, loaded_data, enrichment_mode or 'species'
-            ).items()
-        }
+        try:
+            _ENRICHMENT_CACHE[_enr_cache_key] = {
+                str(k): v for k, v in _run_dynamic_enrichment(
+                    active_species, loaded_data, enrichment_mode or 'species'
+                ).items()
+            }
+        except Exception as e:
+            print(f"[enrichment] failed: {e}")
+            _ENRICHMENT_CACHE[_enr_cache_key] = {}
     dynamic_enrichment = _ENRICHMENT_CACHE[_enr_cache_key]
     enriched_clusters = set(dynamic_enrichment.keys())  # set of str cluster labels
 
