@@ -761,76 +761,61 @@ def _run_dynamic_enrichment(active_species, loaded_data, enrichment_mode):
     if not loaded_data or not active_species:
         return {}
 
-    # Build flat list of (cluster, label) using active species only
-    records = []
+    parts = []
     for sp_data in loaded_data:
         sp_name = sp_data['name']
         if sp_name not in active_species:
             continue
-        if enrichment_mode == 'group':
-            label = _SPECIES_TO_GROUP.get(sp_name, sp_name)
+        label = _SPECIES_TO_GROUP.get(sp_name, sp_name) if enrichment_mode == 'group' else sp_name
+        raw = _FULL_SEARCH_DATA.get(sp_name)
+        if raw:
+            df_sp = pd.DataFrame(raw, columns=['Entry', 'Protein names', 'Cluster Label', 'UMAP 1', 'UMAP 2'])
         else:
-            label = sp_name
-        # Use the full unsampled dataset stored at load time, not the display
-        # sample (SAMPLE_SIZE=3000). With K=100 clusters, the sample gives only
-        # ~24 proteins/cluster/species — no statistical power for any species.
-        full_records = _FULL_SEARCH_DATA.get(sp_name, sp_data['df'])
-        for rec in full_records:
-            cl = rec.get('Cluster Label')
-            if cl is not None and str(cl) != 'nan':
-                try:
-                    cl_int = int(float(cl))
-                except (ValueError, TypeError):
-                    continue
-                if cl_int >= 0:
-                    records.append((cl_int, label))
+            df_sp = pd.DataFrame(sp_data['df'])
+        df_sp = df_sp[['Cluster Label']].dropna()
+        df_sp = df_sp[df_sp['Cluster Label'] >= 0].copy()
+        df_sp['Cluster Label'] = df_sp['Cluster Label'].astype(int)
+        df_sp['label'] = label
+        parts.append(df_sp)
 
-    if not records:
+    if not parts:
         return {}
 
-    clusters_arr = np.array([r[0] for r in records])
-    labels_arr   = np.array([r[1] for r in records])
-    N = len(records)
+    df_all = pd.concat(parts, ignore_index=True)
+    N = len(df_all)
 
-    unique_labels   = list(dict.fromkeys(labels_arr))  # preserve order, deduplicate
-    unique_clusters = sorted(set(clusters_arr))
-    label_totals    = {lbl: int((labels_arr == lbl).sum()) for lbl in unique_labels}
+    # Vectorized counts: cluster × label → k, M, K all in one groupby
+    cluster_sizes = df_all.groupby('Cluster Label').size().rename('M')
+    label_totals  = df_all.groupby('label').size().rename('K')
+    counts = df_all.groupby(['Cluster Label', 'label']).size().reset_index(name='k')
+    counts = counts.join(cluster_sizes, on='Cluster Label').join(label_totals, on='label')
+    counts['N'] = N
 
-    rows = []
-    for lbl in unique_labels:
-        K = label_totals[lbl]
-        for cl in unique_clusters:
-            mask_cl = clusters_arr == cl
-            M = int(mask_cl.sum())
-            k = int((mask_cl & (labels_arr == lbl)).sum())
-            pval = hypergeom.sf(k - 1, N, K, M)
-            rows.append({'label': lbl, 'cluster': cl, 'pval': float(pval), 'k': k, 'M': M})
+    # Single vectorized hypergeom call (no Python loop)
+    counts['pval'] = hypergeom.sf(
+        counts['k'].values - 1,
+        counts['N'].values,
+        counts['K'].values,
+        counts['M'].values,
+    )
 
-    df_tests = pd.DataFrame(rows)
+    # BH correction per label
     corrected = []
-    for lbl in unique_labels:
-        sub = df_tests[df_tests['label'] == lbl].copy().reset_index(drop=True)
+    for lbl, sub in counts.groupby('label'):
+        sub = sub.copy().reset_index(drop=True)
         _, padj, _, _ = multipletests(sub['pval'], method='fdr_bh')
         sub['padj'] = padj
         corrected.append(sub)
     df_tests = pd.concat(corrected, ignore_index=True)
 
     result = {}
-    for cl in unique_clusters:
-        sig = df_tests[(df_tests['cluster'] == cl) & (df_tests['padj'] < 0.05)].sort_values('padj')
-        if sig.empty:
-            continue
-        dominant = sig.iloc[0]['label']
-        all_enriched = sig['label'].tolist()
-        if enrichment_mode == 'group':
-            color = _GROUP_COLORS.get(dominant, '#666677')
-        else:
-            color = SPECIES_DATA.get(dominant, {}).get('color', '#666677')
-        result[cl] = {
-            'dominant': dominant,
-            'color':    color,
-            'all_enriched': all_enriched,
-        }
+    sig_all = df_tests[df_tests['padj'] < 0.05].sort_values('padj')
+    for cl, grp in sig_all.groupby('Cluster Label'):
+        dominant = grp.iloc[0]['label']
+        all_enriched = grp['label'].tolist()
+        color = _GROUP_COLORS.get(dominant, '#666677') if enrichment_mode == 'group' \
+                else SPECIES_DATA.get(dominant, {}).get('color', '#666677')
+        result[cl] = {'dominant': dominant, 'color': color, 'all_enriched': all_enriched}
     return result
 
 # Full-resolution search index: species_name -> list of {Entry, Protein names, Cluster Label}
