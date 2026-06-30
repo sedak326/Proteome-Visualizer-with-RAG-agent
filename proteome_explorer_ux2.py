@@ -3084,6 +3084,8 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
                 if cl is None or str(cl) == 'nan' or int(cl) < 0:
                     continue
                 cl = int(cl)
+                if protein_filter == 'enriched' and str(cl) not in enriched_clusters:
+                    continue
                 cluster_points.setdefault(cl, []).append(
                     (r['UMAP 1 Scaled'], r['UMAP 2 Scaled'])
                 )
