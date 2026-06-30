@@ -235,8 +235,11 @@ def main():
 
     # n_neighbors=50 captures global protein-family structure for large cross-species datasets;
     # n_neighbors=15 (default) only sees local micro-structure and produces a continuous cloud.
-    # min_dist=0.0 tightens clusters so K-means finds real groups instead of diffuse blobs.
-    reducer = _UMAP_CLASS(n_components=2, random_state=42, n_neighbors=50, min_dist=0.0)
+    # min_dist=0.1 (UMAP default) lets points spread slightly within each protein family so
+    # K-means over-splits at high K and the silhouette curve shows a real peak.
+    # min_dist=0.0 was tried previously but eliminates the intra-family spread, causing the
+    # silhouette to increase monotonically — the K search then always returns K_MAX.
+    reducer = _UMAP_CLASS(n_components=2, random_state=42, n_neighbors=50, min_dist=0.1)
     embedding_2d = np.array(reducer.fit_transform(embeddings_array))  # np.array() handles cupy output
     print(f"UMAP embedding complete!", flush=True)
     print(f"Embedding shape: {embedding_2d.shape}", flush=True)

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=proteome_umap
-#SBATCH --nodelist=gpu2
-#SBATCH --partition=ws-gpu2
+#SBATCH --nodelist=gpu
+#SBATCH --partition=ws-gpu
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=8
@@ -31,6 +31,15 @@ echo "=== Step 1: UMAP ==="
 $PYTHON create_combined_umap.py
 
 echo "=== Step 2: K-means recluster + cluster naming ==="
-$PYTHON recluster_kmeans.py
+OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 $PYTHON recluster_kmeans.py
 
-echo "Done."
+echo "=== Step 3: Species enrichment ==="
+$PYTHON compute_enrichment.py
+
+echo "=== Step 4: Group enrichment ==="
+$PYTHON compute_group_enrichment.py
+
+echo "=== Step 5: Cluster quality ==="
+$PYTHON compute_cluster_quality.py
+
+echo "All done."

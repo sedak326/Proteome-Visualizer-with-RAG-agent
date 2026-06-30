@@ -1,6 +1,10 @@
 """
 Re-cluster existing 2D UMAP coordinates with K-means.
-K is chosen by maximizing silhouette score over a search range.
+K is chosen by maximizing silhouette score in [K_MIN, K_MAX].
+This works correctly with UMAP min_dist=0.1: the intra-family spread means
+increasing K eventually over-splits clusters and the silhouette drops, producing
+a real peak. (With min_dist=0.0, the curve was monotonically increasing and
+the search always returned K_MAX — that bug is now fixed in create_combined_umap.py.)
 Updates the Cluster Label column in each per-species UMAP CSV and
 adds a Cluster Name column derived from bi-gram analysis of protein names.
 """
@@ -24,24 +28,27 @@ UMAP_FILES = {
     'Hippopotamus':       'umap_output/Hippopotamus_umap.csv',
 }
 
-# K search range — silhouette score picks the best.
-# After fixing UMAP parameters (n_neighbors=50, min_dist=0.0), the silhouette
-# should peak somewhere in this range rather than monotonically increasing.
-K_MIN = 20
-K_MAX = 400
+# K search range. With min_dist=0.1, the silhouette peak typically lands in
+# the 80-150 range. K_MAX=200 avoids the old K=370 mistake.
+K_MIN  = 20
+K_MAX  = 200
 K_STEP = 10
 
-# Silhouette is expensive on 130k points; subsample for scoring only
+# Silhouette is expensive on 130k points; subsample for scoring only.
 SILHOUETTE_SAMPLE = 10000
 RANDOM_STATE = 42
 
-# Words to skip when generating cluster labels from protein names
+# Words to skip when generating cluster labels from protein names.
+# 'low' and 'quality' are suppressed to prevent "Low Quality" becoming a
+# cluster name (UniProt annotates some proteins as "LOW QUALITY PROTEIN:").
 _STOP_WORDS = {
     'protein', 'domain', 'family', 'like', 'related', 'putative',
     'predicted', 'probable', 'homolog', 'isoform', 'subunit',
     'chain', 'precursor', 'fragment', 'uncharacterized', 'type',
     'and', 'the', 'of', 'with', 'to', 'a', 'an',
+    'low', 'quality',
 }
+
 
 
 def find_best_k(coords: np.ndarray) -> tuple[int, float]:
@@ -139,7 +146,7 @@ def main():
         1 for lbl in unique_labels
         if len(set(species_arr[all_labels == lbl])) == 1
     )
-    all_species = sum(
+    all_species_count = sum(
         1 for lbl in unique_labels
         if len(set(species_arr[all_labels == lbl])) == 7
     )
@@ -147,7 +154,7 @@ def main():
     print(f"\nCluster composition (k={best_k}):")
     print(f"  Total clusters: {len(unique_labels)}")
     print(f"  Clusters with only 1 species: {species_exclusive} ({100*species_exclusive/len(unique_labels):.1f}%)")
-    print(f"  Clusters with all 7 species:  {all_species} ({100*all_species/len(unique_labels):.1f}%)")
+    print(f"  Clusters with all 7 species:  {all_species_count} ({100*all_species_count/len(unique_labels):.1f}%)")
 
     print("\nSample cluster names:")
     for lbl in list(unique_labels)[:10]:

@@ -707,7 +707,131 @@ def _load_cluster_enrichment():
     df = df.fillna('')  # empty cells load as float NaN; downstream code expects strings
     return df.set_index('Cluster Label').to_dict('index')
 
+def _load_cluster_quality():
+    path = BASE_DIR / 'umap_output' / 'cluster_quality.csv'
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path)
+    df = df.fillna('')
+    return df.set_index('Cluster Label').to_dict('index')
+
+def _load_group_enrichment():
+    path = BASE_DIR / 'umap_output' / 'group_enrichment.csv'
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path)
+    df = df.fillna('')
+    return df.set_index('Cluster Label').to_dict('index')
+
 _CLUSTER_ENRICHMENT: dict = _load_cluster_enrichment()
+_CLUSTER_QUALITY: dict    = _load_cluster_quality()
+_GROUP_ENRICHMENT: dict   = _load_group_enrichment()
+_ENRICHMENT_CACHE: dict   = {}  # (tuple(sorted_species), mode) → enrichment dict
+
+def _load_annotation_enrichment():
+    path = BASE_DIR / 'umap_output' / 'annotation_enrichment.csv'
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path).fillna('')
+    return df.set_index('Cluster Label').to_dict('index')
+
+_ANNOTATION_ENRICHMENT: dict = _load_annotation_enrichment()
+
+_SPECIES_TO_GROUP = {
+    'Sea Lion':          'Pinniped',
+    'Harbor Seal':       'Pinniped',
+    'Bottlenose Dolphin':'Cetacean',
+    'Gray Whale':        'Cetacean',
+    'Orca':              'Cetacean',
+    'Polar Bear':        'Carnivore',
+    'Hippopotamus':      'Hippo',
+}
+_GROUP_COLORS = {
+    'Pinniped':  '#C77DFF',
+    'Cetacean':  '#4CC9F0',
+    'Hippo':     '#FF9F1C',
+    'Carnivore': '#06D6A0',
+}
+
+def _run_dynamic_enrichment(active_species, loaded_data, enrichment_mode):
+    """Hypergeometric enrichment using only the currently active species as background."""
+    from scipy.stats import hypergeom
+    from statsmodels.stats.multitest import multipletests
+
+    if not loaded_data or not active_species:
+        return {}
+
+    # Build flat list of (cluster, label) using active species only
+    records = []
+    for sp_data in loaded_data:
+        sp_name = sp_data['name']
+        if sp_name not in active_species:
+            continue
+        if enrichment_mode == 'group':
+            label = _SPECIES_TO_GROUP.get(sp_name, sp_name)
+        else:
+            label = sp_name
+        # Use the full unsampled dataset stored at load time, not the display
+        # sample (SAMPLE_SIZE=3000). With K=100 clusters, the sample gives only
+        # ~24 proteins/cluster/species — no statistical power for any species.
+        full_records = _FULL_SEARCH_DATA.get(sp_name, sp_data['df'])
+        for rec in full_records:
+            cl = rec.get('Cluster Label')
+            if cl is not None and str(cl) != 'nan':
+                try:
+                    cl_int = int(float(cl))
+                except (ValueError, TypeError):
+                    continue
+                if cl_int >= 0:
+                    records.append((cl_int, label))
+
+    if not records:
+        return {}
+
+    clusters_arr = np.array([r[0] for r in records])
+    labels_arr   = np.array([r[1] for r in records])
+    N = len(records)
+
+    unique_labels   = list(dict.fromkeys(labels_arr))  # preserve order, deduplicate
+    unique_clusters = sorted(set(clusters_arr))
+    label_totals    = {lbl: int((labels_arr == lbl).sum()) for lbl in unique_labels}
+
+    rows = []
+    for lbl in unique_labels:
+        K = label_totals[lbl]
+        for cl in unique_clusters:
+            mask_cl = clusters_arr == cl
+            M = int(mask_cl.sum())
+            k = int((mask_cl & (labels_arr == lbl)).sum())
+            pval = hypergeom.sf(k - 1, N, K, M)
+            rows.append({'label': lbl, 'cluster': cl, 'pval': float(pval), 'k': k, 'M': M})
+
+    df_tests = pd.DataFrame(rows)
+    corrected = []
+    for lbl in unique_labels:
+        sub = df_tests[df_tests['label'] == lbl].copy().reset_index(drop=True)
+        _, padj, _, _ = multipletests(sub['pval'], method='fdr_bh')
+        sub['padj'] = padj
+        corrected.append(sub)
+    df_tests = pd.concat(corrected, ignore_index=True)
+
+    result = {}
+    for cl in unique_clusters:
+        sig = df_tests[(df_tests['cluster'] == cl) & (df_tests['padj'] < 0.05)].sort_values('padj')
+        if sig.empty:
+            continue
+        dominant = sig.iloc[0]['label']
+        all_enriched = sig['label'].tolist()
+        if enrichment_mode == 'group':
+            color = _GROUP_COLORS.get(dominant, '#666677')
+        else:
+            color = SPECIES_DATA.get(dominant, {}).get('color', '#666677')
+        result[cl] = {
+            'dominant': dominant,
+            'color':    color,
+            'all_enriched': all_enriched,
+        }
+    return result
 
 # Full-resolution search index: species_name -> list of {Entry, Protein names, Cluster Label}
 # Populated when species are loaded; never sampled so protein searches are exhaustive.
@@ -1258,6 +1382,7 @@ app.layout = html.Div([
     dcc.Store(id='loaded-data', data=None),
     dcc.Store(id='selected-species-store', data=[]),
     dcc.Store(id='active-species-store', data=[]),
+    dcc.Store(id='dynamic-enrichment', data={}),
     dcc.Store(id='chat-history', data=[]),
     dcc.Store(id='pending-query', data=None),
 
@@ -1511,8 +1636,7 @@ app.layout = html.Div([
                     id='protein-filter',
                     options=[
                         {'label': 'ALL', 'value': 'all'},
-                        {'label': 'SPECIES-SPECIFIC', 'value': 'unique'},
-                        {'label': 'SHARED', 'value': 'shared'}
+                        {'label': 'ENRICHED CLUSTERS', 'value': 'enriched'},
                     ],
                     value='all',
                     style={'fontFamily': '"JetBrains Mono", monospace', 'fontSize': 10,
@@ -1524,6 +1648,30 @@ app.layout = html.Div([
                 ),
             ], id='protein-filter-container',
                style={'display': 'flex', 'alignItems': 'center', 'gap': '6px', 'flexShrink': '0'}),
+
+            html.Div(style={'width': 1, 'height': 28, 'background': 'rgba(100, 255, 218, 0.2)',
+                           'flexShrink': '0'}),
+
+            # Enrichment view toggle
+            html.Div([
+                html.Span('CLUSTERS', style={'fontSize': 9, 'color': 'rgba(168,218,220,0.5)',
+                                             'fontFamily': '"JetBrains Mono", monospace',
+                                             'letterSpacing': '1px', 'marginRight': 5}),
+                dcc.RadioItems(
+                    id='enrichment-mode',
+                    options=[
+                        {'label': 'SPECIES', 'value': 'species'},
+                        {'label': 'GROUP',   'value': 'group'},
+                    ],
+                    value='species',
+                    style={'fontFamily': '"JetBrains Mono", monospace', 'fontSize': 10,
+                           'letterSpacing': '0.5px', 'display': 'flex', 'gap': '2px'},
+                    labelStyle={'display': 'inline-flex', 'alignItems': 'center',
+                                'color': '#a8dadc', 'cursor': 'pointer',
+                                'whiteSpace': 'nowrap'},
+                    inputStyle={'marginRight': 4}
+                ),
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '4px', 'flexShrink': '0'}),
 
             # Filter count
             html.Div(id='filter-count-display',
@@ -1740,7 +1888,7 @@ for species in SPECIES_DATA.keys():
         current = list(current or [])
         if sp in current:
             current.remove(sp)
-        elif len(current) < 3:
+        else:
             current.append(sp)
         return current
 
@@ -1846,6 +1994,7 @@ def show_animation_screen(n_clicks, selected_species):
     animation_style = {'display': 'block', 'backgroundColor': 'transparent',
                       'minHeight': '100vh', 'paddingTop': 60, 'opacity': 1}
     return selection_style, animation_style
+
 
 @app.callback(
     [Output('loaded-data', 'data'),
@@ -2899,9 +3048,10 @@ def update_toggle_styles(active_species):
      Input('loaded-data', 'data'),
      Input('protein-filter', 'value'),
      Input('active-species-store', 'data'),
-     Input('highlight-store', 'data')]
+     Input('highlight-store', 'data'),
+     Input('enrichment-mode', 'value')]
 )
-def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, active_species, highlight_data):
+def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, active_species, highlight_data, enrichment_mode):
     if not loaded_data:
         return go.Figure()
     active_species = active_species or []
@@ -2915,11 +3065,20 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
     fig = go.Figure()
 
     # Build convex hulls for all clusters, merged into 2 traces (fill + border) using None
+    # Compute dynamic enrichment once — used for hull coloring AND protein filter.
+    _enr_cache_key = (tuple(sorted(active_species or [])), enrichment_mode or 'species')
+    if _enr_cache_key not in _ENRICHMENT_CACHE:
+        _ENRICHMENT_CACHE[_enr_cache_key] = {
+            str(k): v for k, v in _run_dynamic_enrichment(
+                active_species, loaded_data, enrichment_mode or 'species'
+            ).items()
+        }
+    dynamic_enrichment = _ENRICHMENT_CACHE[_enr_cache_key]
+    enriched_clusters = set(dynamic_enrichment.keys())  # set of str cluster labels
+
     # separators. This replaces 263 individual traces with 2, dramatically reducing browser load.
-    # Skip entirely when species-specific filter is active (no clusters shown then).
     cluster_points = {}
-    if protein_filter != 'unique':
-        for sd in active_data:
+    for sd in active_data:
             for r in sd['df']:
                 cl = r.get('Cluster Label')
                 if cl is None or str(cl) == 'nan' or int(cl) < 0:
@@ -2955,6 +3114,8 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
         _UNENRICHED_COLOR = '#666677'
         groups: dict[str, dict] = {}  # hex_color -> {fill_x, fill_y, border_x, border_y}
 
+        use_group_mode = (enrichment_mode == 'group')
+
         for cl, points in sorted(cluster_points.items()):
             if len(points) < 3:
                 continue
@@ -2965,42 +3126,46 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
                 poly_x = verts[:, 0].tolist() + [verts[0, 0], None]
                 poly_y = verts[:, 1].tolist() + [verts[0, 1], None]
 
-                enr = _CLUSTER_ENRICHMENT.get(cl, {})
-                dominant_sp = enr.get('Dominant Species', '')
-                # Only highlight enrichment if the dominant species is currently visible
-                if dominant_sp and dominant_sp in active_species:
-                    hex_color = enr.get('Dominant Color', _UNENRICHED_COLOR) or _UNENRICHED_COLOR
-                else:
-                    hex_color = _UNENRICHED_COLOR
+                qual = _CLUSTER_QUALITY.get(cl, {})
+                well_sep = bool(qual.get('Well Separated', True))
 
-                if hex_color not in groups:
-                    groups[hex_color] = {'fill_x': [], 'fill_y': [], 'bord_x': [], 'bord_y': []}
-                groups[hex_color]['fill_x'].extend(poly_x)
-                groups[hex_color]['fill_y'].extend(poly_y)
-                groups[hex_color]['bord_x'].extend(poly_x)
-                groups[hex_color]['bord_y'].extend(poly_y)
+                dyn = dynamic_enrichment.get(str(cl), {})
+                hex_color = dyn.get('color', _UNENRICHED_COLOR) or _UNENRICHED_COLOR
+
+                # Group key encodes both color and quality so fuzzy/solid are separate traces
+                group_key = (hex_color, well_sep)
+                if group_key not in groups:
+                    groups[group_key] = {'fill_x': [], 'fill_y': [], 'bord_x': [], 'bord_y': []}
+                groups[group_key]['fill_x'].extend(poly_x)
+                groups[group_key]['fill_y'].extend(poly_y)
 
                 cx, cy = pts[:, 0].mean(), pts[:, 1].mean()
                 centroid_x.append(cx)
                 centroid_y.append(cy)
                 centroid_cl.append(cl)
-                centroid_colors.append(hex_color if dominant_sp in active_species else _UNENRICHED_COLOR)
-                cluster_name = enr.get('Cluster Name') or f'Cluster {cl}'
+                centroid_colors.append(hex_color)
+                cluster_name = _CLUSTER_QUALITY.get(cl, {}).get('Cluster Name') or f'Cluster {cl}'
                 centroid_labels.append(cluster_name)
             except Exception:
                 pass
 
-        for hex_color, g in groups.items():
+        for (hex_color, well_sep), g in groups.items():
             r_hex = hex_color.lstrip('#')
             r, gr, b = int(r_hex[0:2], 16), int(r_hex[2:4], 16), int(r_hex[4:6], 16)
             is_enriched = hex_color != _UNENRICHED_COLOR
-            fill_alpha  = 0.18 if is_enriched else 0.07
-            bord_alpha  = 0.60 if is_enriched else 0.25
+            if is_enriched and well_sep:
+                fill_alpha, bord_alpha, dash, width = 0.18, 0.65, 'solid', 1.8
+            elif is_enriched and not well_sep:
+                fill_alpha, bord_alpha, dash, width = 0.08, 0.30, 'dot',   1.2
+            elif well_sep:
+                fill_alpha, bord_alpha, dash, width = 0.07, 0.25, 'solid', 0.8
+            else:
+                fill_alpha, bord_alpha, dash, width = 0.03, 0.12, 'dot',   0.6
             fig.add_trace(go.Scatter(
                 x=g['fill_x'], y=g['fill_y'],
                 fill='toself',
                 fillcolor=f'rgba({r},{gr},{b},{fill_alpha})',
-                line=dict(color=f'rgba({r},{gr},{b},{bord_alpha})', width=1.5 if is_enriched else 0.8),
+                line=dict(color=f'rgba({r},{gr},{b},{bord_alpha})', width=width, dash=dash),
                 mode='lines',
                 hoverinfo='skip',
                 showlegend=False,
@@ -3010,8 +3175,10 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
         df_records = species_data['df']
 
         # Apply protein filter
-        if protein_filter and protein_filter != 'all':
-            df_records = [r for r in df_records if r.get('filter_tag') == protein_filter]
+        if protein_filter == 'enriched':
+            df_records = [r for r in df_records
+                          if str(int(r['Cluster Label'])) in enriched_clusters
+                          if r.get('Cluster Label') is not None]
 
         if not df_records:
             # Empty trace to preserve curveNumber indexing
@@ -3032,13 +3199,14 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
                 text += f"Protein: {str(record['Protein names'])[:60]}...<br>"
             cl = record.get('Cluster Label')
             cl_name = record.get('Cluster Name') or (
-                _CLUSTER_ENRICHMENT.get(int(cl), {}).get('Cluster Name', '') if cl is not None else '')
+                _CLUSTER_QUALITY.get(int(cl), {}).get('Cluster Name', '') if cl is not None else '')
             if cl is not None:
-                enr = _CLUSTER_ENRICHMENT.get(int(cl) if cl != -1 else -1, {})
-                dominant = enr.get('Dominant Species', '')
+                dyn_cl = dynamic_enrichment.get(str(int(cl)), {}) if cl is not None else {}
+                dominant = str(dyn_cl.get('dominant', ''))
                 text += f"Cluster: {cl_name or cl}"
                 if dominant:
-                    text += f" <i>(enriched: {dominant})</i>"
+                    all_enr = dyn_cl.get('all_enriched', [dominant])
+                    text += f" <i>(enriched: {', '.join(str(s) for s in all_enr)})</i>"
             hover_text.append(text)
         fig.add_trace(go.Scattergl(
             x=[r['UMAP 1 Scaled'] for r in df_records],
@@ -3056,15 +3224,29 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
     if centroid_x:
         centroid_hover = []
         for cl, label in zip(centroid_cl, centroid_labels):
-            enr = _CLUSTER_ENRICHMENT.get(cl, {})
-            dominant = enr.get('Dominant Species', '')
-            all_enr_raw = enr.get('All Enriched', '') or ''
-            # Only show enrichment hint for species that are currently visible
-            visible_enriched = [s for s in all_enr_raw.split(', ') if s and s in active_species]
-            if visible_enriched:
-                tip = f'<b>{label}</b><br>Enriched: {", ".join(visible_enriched)}<extra></extra>'
-            else:
-                tip = f'<b>{label}</b> — click to select<extra></extra>'
+            qual = _CLUSTER_QUALITY.get(cl, {})
+            sil  = qual.get('Mean Silhouette', '')
+            well_sep = qual.get('Well Separated', '')
+
+            dyn = dynamic_enrichment.get(str(cl), {})
+            ann = _ANNOTATION_ENRICHMENT.get(cl, {})
+            tip = f'<b>{label}</b>'
+            top_term = str(ann.get('Top Term', '') or '')
+            if top_term:
+                tip += f'<br><i>{top_term}</i>'
+            dominant = dyn.get('dominant', '')
+            all_enriched = dyn.get('all_enriched', [])
+            if dominant:
+                if use_group_mode:
+                    tip += f'<br>Enriched group: {dominant}'
+                    if len(all_enriched) > 1:
+                        tip += f' (also: {", ".join(all_enriched[1:])})'
+                else:
+                    tip += f'<br>Enriched: {", ".join(str(s) for s in all_enriched)}'
+            if sil != '':
+                quality_label = 'well-separated' if well_sep else 'fuzzy'
+                tip += f'<br>Silhouette: {float(sil):.2f} ({quality_label})'
+            tip += '<extra></extra>'
             centroid_hover.append(tip)
 
         fig.add_trace(go.Scatter(
