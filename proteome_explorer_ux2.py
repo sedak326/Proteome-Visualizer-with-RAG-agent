@@ -1062,6 +1062,36 @@ def load_data_for_species(species_list):
         p["df"]['UMAP 2 Scaled'] = (p["df"]['UMAP 2'] - umap_center_y) * scale_factor
     return placed_animals
 
+# Server-side cache of the full per-species dataset. Dash's dcc.Store round-trips its
+# contents over HTTP on every callback that lists it as Input/State, so keeping ~21k
+# protein records there meant every species toggle, slider drag, or filter change
+# re-shipped several MB between browser and server. All species share the same data
+# regardless of which browser session asks for it, so a single global cache (same
+# pattern as _FULL_SEARCH_DATA above) is safe and lets the store just carry a marker.
+_SERVER_LOADED_DATA: list = []
+
+def _get_all_species_data_cached():
+    """Load (once) and cache proteome data for all species, server-side only."""
+    global _SERVER_LOADED_DATA
+    if _SERVER_LOADED_DATA:
+        return _SERVER_LOADED_DATA
+    all_species = list(SPECIES_DATA.keys())
+    placed_animals = load_data_for_species(all_species)
+    data_json = []
+    for p in placed_animals:
+        data_json.append({
+            'name': p['name'],
+            'x': p['x'].tolist(),
+            'y': p['y'].tolist(),
+            'colors': p['colors'].tolist(),
+            'color': p['color'],
+            'df': p['df'].to_dict('records'),
+            'umap_1_scaled': p['df']['UMAP 1 Scaled'].tolist(),
+            'umap_2_scaled': p['df']['UMAP 2 Scaled'].tolist()
+        })
+    _SERVER_LOADED_DATA = data_json
+    return _SERVER_LOADED_DATA
+
 # Load animal icons
 print("Loading animal icons...")
 animal_icons = {}
@@ -2005,25 +2035,14 @@ def load_proteome_data(n_clicks, selected_species):
         if not animation_path:
             print("Failed to generate animation, using placeholder")
             animation_path = None
-    # Load ALL species data so toggling is instant
+    # Load ALL species data so toggling is instant. Cached server-side and never sent
+    # to the browser directly — the store below only carries a small ready marker.
     all_species = list(SPECIES_DATA.keys())
     print(f"Loading data for ALL species: {all_species}")
-    placed_animals = load_data_for_species(all_species)
-
-    data_json = []
-    for p in placed_animals:
-        data_json.append({
-            'name': p['name'],
-            'x': p['x'].tolist(),
-            'y': p['y'].tolist(),
-            'colors': p['colors'].tolist(),
-            'color': p['color'],
-            'df': p['df'].to_dict('records'),
-            'umap_1_scaled': p['df']['UMAP 1 Scaled'].tolist(),
-            'umap_2_scaled': p['df']['UMAP 2 Scaled'].tolist()
-        })
+    _get_all_species_data_cached()
+    loaded_marker = {'ready': True, 'species': all_species}
     # Initialize active species to the user's original selection
-    return data_json, selected_species, animation_path, loading_msg
+    return loaded_marker, selected_species, animation_path, loading_msg
 
 @app.callback(
     [Output('loading-indicator', 'style'),
@@ -2902,6 +2921,7 @@ def _resolve_species_command(text, active_species):
     prevent_initial_call=True,
 )
 def ui_highlight_search(search_clicks, clear_clicks, n_submit, search_value, loaded_data, active_species):
+    loaded_data = _get_all_species_data_cached() if loaded_data else None
     if ctx.triggered_id == 'highlight-clear-btn':
         return None
     if not search_value:
@@ -2936,6 +2956,7 @@ def ui_highlight_search(search_clicks, clear_clicks, n_submit, search_value, loa
     prevent_initial_call=True,
 )
 def table_row_click(active_cell, table_data, loaded_data, active_species, last_click):
+    loaded_data = _get_all_species_data_cached() if loaded_data else None
     if not active_cell or not table_data:
         raise dash.exceptions.PreventUpdate
     row_idx = active_cell['row']
@@ -3039,6 +3060,7 @@ def update_toggle_styles(active_species):
 def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, active_species, highlight_data, enrichment_mode):
     if not loaded_data:
         return go.Figure()
+    loaded_data = _get_all_species_data_cached()
     active_species = active_species or []
     # Filter to only active species
     active_data = [sd for sd in loaded_data if sd['name'] in active_species]
@@ -3319,6 +3341,7 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
 def update_filter_count(protein_filter, loaded_data, active_species):
     if not loaded_data:
         return ""
+    loaded_data = _get_all_species_data_cached()
     active_species = active_species or []
     active_data = [sd for sd in loaded_data if sd['name'] in active_species]
     if not active_data:
@@ -3455,6 +3478,7 @@ def _build_protein_rows(entry_ids, loaded_data, active_species):
 def show_selected_proteins(selectedData, highlight_data, loaded_data, active_species):
     if not loaded_data:
         return "No proteins selected. Click or drag to select."
+    loaded_data = _get_all_species_data_cached()
 
     # Highlight search takes precedence when nothing is lassoed
     if (not selectedData or not selectedData.get('points')) and highlight_data and highlight_data.get('entry_ids'):
@@ -3571,6 +3595,7 @@ def go_back(n_clicks):
 def select_cluster_on_click(click_data, loaded_data, active_species, current_msgs, chat_history):
     if not click_data or not loaded_data or not active_species:
         raise dash.exceptions.PreventUpdate
+    loaded_data = _get_all_species_data_cached()
 
     # Extract cluster id from click.
     # Hull traces:    customdata = [cl]          (an int)
@@ -3753,6 +3778,7 @@ def process_chat_query(pending_query, chat_history, active_species, selected_dat
     if not pending_query:
         raise dash.exceptions.PreventUpdate
 
+    loaded_data = _get_all_species_data_cached() if loaded_data else None
     chat_history = chat_history or []
     visual_context = build_visual_context(active_species, selected_data, loaded_data)
 
@@ -4377,4 +4403,4 @@ if __name__ == '__main__':
     print("  - Glassmorphism UI with smooth transitions")
     print("  - Interactive UMAP proteome visualization")
     print("="*60 + "\n")
-    app.run(debug=False, host=host, port=port)
+    app.run(debug=False, host=host, port=port, threaded=True)
