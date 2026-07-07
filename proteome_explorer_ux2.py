@@ -15,7 +15,6 @@ import pandas as pd
 import numpy as np
 import cv2
 from pathlib import Path
-import base64
 import subprocess
 import sys
 from openai import OpenAI as OpenAIClient
@@ -620,6 +619,19 @@ def chat_reply(message, chat_history, visual_context=""):
         return message
 
 
+def _render_chat_messages(history):
+    """Render chat-history entries into message divs. Rebuilding from the store
+    (rather than editing the DOM children list in place) is what lets a
+    transient client-side placeholder (e.g. 'Thinking...') disappear cleanly
+    once the real answer replaces it — the placeholder never entered the store.
+    """
+    return [
+        html.Div(m['content'], className='chat-msg chat-msg-user') if m['role'] == 'user'
+        else html.Div(dcc.Markdown(m['content'], className='chat-md'), className='chat-msg chat-msg-assistant')
+        for m in history
+    ]
+
+
 # Ocean-inspired color palette
 OCEAN_COLORS = {
     'deep_ocean': '#0a192f',
@@ -870,24 +882,6 @@ ANNOTATIONS = load_annotations()
 
 # ============= DATA LOADING =============
 
-def encode_image_to_base64(image_path):
-    """Convert image to base64 for embedding in HTML"""
-    try:
-        with open(image_path, 'rb') as f:
-            encoded = base64.b64encode(f.read()).decode()
-        ext = Path(image_path).suffix.lower()
-        if ext == '.gif':
-            mime_type = 'image/gif'
-        elif ext == '.png':
-            mime_type = 'image/png'
-        elif ext in ['.jpg', '.jpeg']:
-            mime_type = 'image/jpeg'
-        else:
-            mime_type = 'image/png'
-        return f"data:{mime_type};base64,{encoded}"
-    except:
-        return None
-
 def get_animation_path(species_list):
     """Check if pre-rendered animation exists for species combination."""
     species_keys = sorted([SPECIES_DATA[species]['key'] for species in species_list])
@@ -1092,14 +1086,6 @@ def _get_all_species_data_cached():
     _SERVER_LOADED_DATA = data_json
     return _SERVER_LOADED_DATA
 
-# Load animal icons
-print("Loading animal icons...")
-animal_icons = {}
-for species, info in SPECIES_DATA.items():
-    img_path = Path(info['image'])
-    if img_path.exists():
-        animal_icons[species] = encode_image_to_base64(str(img_path))
-print(f"Loaded {len(animal_icons)} animal icons")
 
 # ============= DASH APP =============
 
@@ -1579,7 +1565,7 @@ app.layout = html.Div([
             # Species toggle buttons
             html.Div([
                 html.Button([
-                    html.Img(src=animal_icons.get(species, ''),
+                    html.Img(src=f'/animal_pics/{Path(SPECIES_DATA[species]["image"]).name}',
                              style={'width': '22px', 'height': '22px', 'objectFit': 'contain',
                                     'filter': 'brightness(0) invert(1) opacity(0.9)',
                                     'flexShrink': '0'}),
@@ -1803,6 +1789,7 @@ app.layout = html.Div([
     dcc.Store(id='highlight-store', data=None),
     dcc.Store(id='last-click-store', data=None),
     dcc.Store(id='selected-cluster-store', data=None),
+    dcc.Store(id='pending-cluster-query', data=None),
 
     # Chat widget - floating toggle + panel
     html.Button('Ask AI', id='chat-toggle-btn', n_clicks=0, className='chat-toggle'),
@@ -1907,50 +1894,105 @@ for species in SPECIES_DATA.keys():
             current.append(sp)
         return current
 
-# Store → card visual state (store is single source of truth)
+# Instant client-side highlight on click — mirrors update_selection_screen's card/button
+# styling exactly, so it reads as zero-latency instead of waiting on the round trip to
+# card_click (updates the store) and then update_selection_screen (recomputes styles from
+# the store). The server-side pass still runs right after and re-confirms with identical
+# values, so this is a pure latency win, not a second source of truth.
 for species in SPECIES_DATA.keys():
-    @app.callback(
-        [Output(f'card-{species}', 'style'),
-         Output(f'btn-{species}', 'children'),
-         Output(f'btn-{species}', 'style')],
-        Input('selected-species-store', 'data'),
+    _color = SPECIES_DATA[species]['color']
+    _glow = SPECIES_DATA[species].get('glow', 'rgba(100, 255, 218, 0.3)')
+    app.clientside_callback(
+        f"""
+        function(n_clicks, currentSelected) {{
+            if (!n_clicks) {{
+                return [window.dash_clientside.no_update, window.dash_clientside.no_update, window.dash_clientside.no_update];
+            }}
+            var sel = currentSelected || [];
+            var isSel = sel.includes({json.dumps(species)});
+            var willBeSel = !isSel;
+            var color = {json.dumps(_color)};
+            var glow = {json.dumps(_glow)};
+            var cardStyle = {{
+                padding: 20, textAlign: 'center',
+                transition: 'all 0.08s ease-out',
+                background: willBeSel ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.03)',
+                backdropFilter: 'blur(10px)',
+                border: willBeSel ? ('1px solid ' + color) : '1px solid rgba(255, 255, 255, 0.1)',
+                borderRadius: 16,
+                boxShadow: willBeSel ? ('0 8px 32px ' + glow + ', 0 0 20px ' + glow) : '0 8px 32px rgba(0, 0, 0, 0.2)',
+                transform: willBeSel ? 'translateY(-6px) scale(1.02)' : 'translateY(0) scale(1)',
+            }};
+            var btnStyle = {{
+                padding: '8px 22px', fontSize: 10,
+                backgroundColor: willBeSel ? color : 'transparent',
+                color: willBeSel ? '#0a192f' : '#a8dadc',
+                border: '1px solid ' + color,
+                borderRadius: 25, cursor: 'pointer',
+                transition: 'all 0.08s ease-out', fontWeight: '500',
+                fontFamily: '"JetBrains Mono", monospace',
+                letterSpacing: '2px', textTransform: 'uppercase',
+            }};
+            var btnText = willBeSel ? 'Selected' : 'Select';
+            return [cardStyle, btnText, btnStyle];
+        }}
+        """,
+        [Output(f'card-{species}', 'style', allow_duplicate=True),
+         Output(f'btn-{species}', 'children', allow_duplicate=True),
+         Output(f'btn-{species}', 'style', allow_duplicate=True)],
+        Input(f'btn-{species}', 'n_clicks'),
+        State('selected-species-store', 'data'),
+        prevent_initial_call=True,
     )
-    def update_card_visual(selected, sp=species):
-        selected = selected or []
+
+# Store → card visual state (store is single source of truth)
+_SPECIES_LIST = list(SPECIES_DATA.keys())
+
+# All of these used to be 9 separate callbacks (7 per-species card/button updates,
+# the selected-display block, and the phylo tree) that all fire from the exact same
+# single Input. Dash dispatches each registered callback as its own HTTP round trip,
+# so one click on a species card was cascading into 9 concurrent requests to the
+# dev server for what is, in total, a few milliseconds of Python work. Merging them
+# into one callback turns that into a single request.
+@app.callback(
+    [Output(f'card-{sp}', 'style') for sp in _SPECIES_LIST] +
+    [Output(f'btn-{sp}', 'children') for sp in _SPECIES_LIST] +
+    [Output(f'btn-{sp}', 'style') for sp in _SPECIES_LIST] +
+    [Output('selected-species-display', 'children'),
+     Output('view-button', 'disabled'),
+     Output('view-button', 'style'),
+     Output('selection-phylo-tree', 'figure')],
+    Input('selected-species-store', 'data'),
+)
+def update_selection_screen(selected):
+    selected = selected or []
+
+    card_styles, btn_texts, btn_styles = [], [], []
+    for sp in _SPECIES_LIST:
         is_sel = sp in selected
         color = SPECIES_DATA[sp]['color']
         glow  = SPECIES_DATA[sp].get('glow', 'rgba(100, 255, 218, 0.3)')
-        card_style = {
+        card_styles.append({
             'padding': 20, 'textAlign': 'center',
-            'transition': 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
+            'transition': 'all 0.08s ease-out',
             'background': 'rgba(255, 255, 255, 0.08)' if is_sel else 'rgba(255, 255, 255, 0.03)',
             'backdropFilter': 'blur(10px)',
             'border': f'1px solid {color}' if is_sel else '1px solid rgba(255, 255, 255, 0.1)',
             'borderRadius': 16,
             'boxShadow': f'0 8px 32px {glow}, 0 0 20px {glow}' if is_sel else '0 8px 32px rgba(0, 0, 0, 0.2)',
             'transform': 'translateY(-6px) scale(1.02)' if is_sel else 'translateY(0) scale(1)',
-        }
-        btn_text = 'Selected' if is_sel else 'Select'
-        btn_style = {
+        })
+        btn_texts.append('Selected' if is_sel else 'Select')
+        btn_styles.append({
             'padding': '8px 22px', 'fontSize': 10,
             'backgroundColor': color if is_sel else 'transparent',
             'color': '#0a192f' if is_sel else '#a8dadc',
             'border': f'1px solid {color}',
             'borderRadius': 25, 'cursor': 'pointer',
-            'transition': 'all 0.3s ease', 'fontWeight': '500',
+            'transition': 'all 0.08s ease-out', 'fontWeight': '500',
             'fontFamily': '"JetBrains Mono", monospace',
             'letterSpacing': '2px', 'textTransform': 'uppercase',
-        }
-        return card_style, btn_text, btn_style
-
-@app.callback(
-    [Output('selected-species-display', 'children'),
-     Output('view-button', 'disabled'),
-     Output('view-button', 'style')],
-    Input('selected-species-store', 'data'),
-)
-def update_selected_display(selected):
-    selected = selected or []
+        })
 
     if not selected:
         display = "No organisms selected"
@@ -1993,7 +2035,12 @@ def update_selected_display(selected):
             'textTransform': 'uppercase'
         }
 
-    return display, disabled, btn_style
+    phylo_fig = _build_phylo_figure(selected, height=200)
+    phylo_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+    for shape in phylo_fig.layout.shapes:
+        shape.line.color = 'rgba(100,255,218,0.55)'
+
+    return (*card_styles, *btn_texts, *btn_styles, display, disabled, btn_style, phylo_fig)
 
 @app.callback(
     [Output('selection-screen', 'style'),
@@ -3022,6 +3069,44 @@ def update_active_species(*args):
     raise dash.exceptions.PreventUpdate
 
 
+# Instant client-side highlight for the explorer's toggle buttons — same trick as the
+# selection-screen cards. Mirrors update_toggle_styles' per-species style exactly, and
+# replicates the "can't deselect the last active species" guard from update_active_species
+# so the optimistic flip never shows a state the server would reject a moment later.
+for species in SPECIES_DATA.keys():
+    _toggle_color = SPECIES_DATA[species]['color']
+    app.clientside_callback(
+        f"""
+        function(n_clicks, currentActive) {{
+            if (!n_clicks) {{
+                return window.dash_clientside.no_update;
+            }}
+            var active = currentActive || [];
+            var isActive = active.includes({json.dumps(species)});
+            if (isActive && active.length <= 1) {{
+                return window.dash_clientside.no_update;
+            }}
+            var willBeActive = !isActive;
+            var color = {json.dumps(_toggle_color)};
+            return {{
+                display: 'inline-flex', alignItems: 'center', gap: '4px',
+                padding: '3px 8px',
+                background: willBeActive ? 'rgba(255, 255, 255, 0.05)' : 'rgba(255, 255, 255, 0.02)',
+                borderRadius: 8,
+                border: willBeActive ? ('1px solid ' + color) : '1px solid rgba(255,255,255,0.15)',
+                cursor: 'pointer',
+                opacity: willBeActive ? 1.0 : 0.4,
+                color: willBeActive ? color : '#a8dadc',
+                transition: 'all 0.15s ease',
+            }};
+        }}
+        """,
+        Output(f'toggle-{species}', 'style', allow_duplicate=True),
+        Input(f'toggle-{species}', 'n_clicks'),
+        State('active-species-store', 'data'),
+        prevent_initial_call=True,
+    )
+
 # --- Style toggle buttons based on active species ---
 @app.callback(
     [Output(f'toggle-{species}', 'style') for species in SPECIES_DATA],
@@ -3580,19 +3665,23 @@ def go_back(n_clicks):
 # ============= CLUSTER SELECTION CALLBACK =============
 
 @app.callback(
-    [Output('selected-cluster-store', 'data'),
-     Output('highlight-store', 'data', allow_duplicate=True),
+    [Output('highlight-store', 'data', allow_duplicate=True),
      Output('selected-cluster-badge', 'children'),
      Output('chat-messages-display', 'children', allow_duplicate=True),
-     Output('chat-history', 'data', allow_duplicate=True)],
+     Output('pending-cluster-query', 'data')],
     Input('interactive-graph', 'clickData'),
     [State('loaded-data', 'data'),
      State('active-species-store', 'data'),
-     State('chat-messages-display', 'children'),
-     State('chat-history', 'data')],
+     State('chat-messages-display', 'children')],
     prevent_initial_call=True,
 )
-def select_cluster_on_click(click_data, loaded_data, active_species, current_msgs, chat_history):
+def select_cluster_on_click(click_data, loaded_data, active_species, current_msgs):
+    """Highlight the clicked cluster immediately. The GPT interpretation used to
+    run synchronously in this same callback (RAG + a gpt-4o call, several seconds),
+    which meant the highlight itself didn't appear until that finished — clicks
+    looked like they hadn't registered. That work now happens in a follow-up
+    callback (interpret_cluster_query) triggered via pending-cluster-query.
+    """
     if not click_data or not loaded_data or not active_species:
         raise dash.exceptions.PreventUpdate
     loaded_data = _get_all_species_data_cached()
@@ -3628,30 +3717,55 @@ def select_cluster_on_click(click_data, loaded_data, active_species, current_msg
     if cluster_id is None:
         raise dash.exceptions.PreventUpdate
 
-    chat_history = chat_history or []
     current_msgs = current_msgs or []
 
-    # Highlight cluster proteins on plot
+    # Highlight cluster proteins on plot — instant, local computation only.
     highlight_data = _resolve_highlight_query(str(cluster_id), loaded_data, active_species)
+    badge_text = f"Cluster {cluster_id} selected"
 
-    # Build enrichment context for this cluster
+    thinking_div = html.Div(
+        f"Analyzing cluster {cluster_id}...",
+        className='chat-msg chat-msg-assistant',
+        style={'opacity': 0.5, 'fontStyle': 'italic'}
+    )
+    new_msgs = list(current_msgs) + [thinking_div]
+    pending = {'cluster_id': cluster_id, 'active_species': active_species}
+
+    return highlight_data, badge_text, new_msgs, pending
+
+
+@app.callback(
+    [Output('selected-cluster-store', 'data'),
+     Output('chat-messages-display', 'children', allow_duplicate=True),
+     Output('chat-history', 'data', allow_duplicate=True)],
+    Input('pending-cluster-query', 'data'),
+    State('chat-history', 'data'),
+    prevent_initial_call=True,
+)
+def interpret_cluster_query(pending, chat_history):
+    """Slow half of cluster selection: RAG lookup + gpt-4o interpretation.
+    Runs after the highlight is already on screen, so this delay no longer
+    reads as an unresponsive click.
+    """
+    if not pending:
+        raise dash.exceptions.PreventUpdate
+    cluster_id = pending['cluster_id']
+    active_species = pending['active_species']
+    loaded_data = _get_all_species_data_cached()
+    chat_history = chat_history or []
+
     active_data = [sd for sd in loaded_data if sd['name'] in active_species]
     info = compute_cluster_enrichment(active_data, cluster_id=cluster_id)
-
-    # GPT interpretation grounded in RAG literature
     interpretation = _interpret_cluster(info, active_species)
 
-    badge_text = f"Cluster {cluster_id} selected"
     store_data = {'cluster_id': cluster_id, 'info': info, 'interpretation': interpretation}
-
-    msg_div = html.Div(
-        dcc.Markdown(interpretation, className='chat-md'),
-        className='chat-msg chat-msg-assistant'
-    )
     chat_history.append({"role": "assistant", "content": interpretation})
-    new_msgs = list(current_msgs) + [msg_div]
 
-    return store_data, highlight_data, badge_text, new_msgs, chat_history
+    # Re-render from chat_history (the source of truth) rather than editing the
+    # displayed children in place — this is what cleanly drops the "Analyzing..."
+    # placeholder, since it was only ever added to the displayed children, not
+    # to chat_history itself.
+    return store_data, _render_chat_messages(chat_history), chat_history
 
 
 # Fire a window resize event shortly after the graph figure updates so Plotly
@@ -3696,19 +3810,23 @@ app.clientside_callback(
 
 # ============= CHAT CALLBACKS =============
 
-@app.callback(
+# Pure UI toggle with no data dependency — runs entirely client-side, no round trip at all.
+app.clientside_callback(
+    """
+    function(n_clicks, currentStyle) {
+        if (!n_clicks) {
+            return window.dash_clientside.no_update;
+        }
+        var style = Object.assign({}, currentStyle || {});
+        style.display = (style.display === 'none') ? 'flex' : 'none';
+        return style;
+    }
+    """,
     Output('chat-panel', 'style'),
     Input('chat-toggle-btn', 'n_clicks'),
     State('chat-panel', 'style'),
     prevent_initial_call=True,
 )
-def toggle_chat_panel(n_clicks, current_style):
-    current_style = current_style or {}
-    if current_style.get('display') == 'none':
-        current_style['display'] = 'flex'
-    else:
-        current_style['display'] = 'none'
-    return current_style
 
 
 # Instant feedback: show user message + thinking indicator, clear input
@@ -3852,13 +3970,7 @@ def process_chat_query(pending_query, chat_history, active_species, selected_dat
     new_size = dash.no_update
     new_opacity = dash.no_update
     mode, text = route_message(chat_history, pending_query, visual_context)
-
-    def _render(history):
-        return [
-            html.Div(m['content'], className='chat-msg chat-msg-user') if m['role'] == 'user'
-            else html.Div(dcc.Markdown(m['content'], className='chat-md'), className='chat-msg chat-msg-assistant')
-            for m in history
-        ]
+    _render = _render_chat_messages
 
     if mode == "control":
         new_filter, new_size, new_opacity, answer = _resolve_ui_command(text, current_size, current_opacity)
@@ -4325,18 +4437,7 @@ def phylo_click_toggle(click_data, active_species):
     return active
 
 
-# ── Selection-screen phylo tree ────────────────────────────────────────────────
-
-@app.callback(
-    Output('selection-phylo-tree', 'figure'),
-    Input('selected-species-store', 'data'),
-)
-def update_selection_phylo(selected_species):
-    fig = _build_phylo_figure(selected_species or [], height=200)
-    fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-    for shape in fig.layout.shapes:
-        shape.line.color = 'rgba(100,255,218,0.55)'
-    return fig
+# selection-phylo-tree.figure is now updated as part of update_selection_screen above.
 
 
 # Clientside: hover on tree → update preview image (zero server round-trip)
