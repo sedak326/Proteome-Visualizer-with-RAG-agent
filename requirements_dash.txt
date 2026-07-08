@@ -1,0 +1,13 @@
+dash>=2.14.0
+plotly>=5.18.0
+pandas>=2.0.0
+numpy>=1.24.0
+opencv-python
+openai
+langchain-chroma
+langchain-openai
+flask
+
+# Only needed if regenerating animations (generate_all_animations.py)
+matplotlib
+scikit-learn
