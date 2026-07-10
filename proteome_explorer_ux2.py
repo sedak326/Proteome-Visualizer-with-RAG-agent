@@ -151,7 +151,24 @@ def build_cluster_summary(active_species, loaded_data):
             if len(sample_names) >= 3:
                 break
         sample_str = "; ".join(sample_names) if sample_names else "no name info"
-        lines.append(f"  Cluster {cl} ({sharing}): {total} proteins — e.g. {sample_str}")
+        line = f"  Cluster {cl} ({sharing}): {total} proteins — e.g. {sample_str}"
+
+        # Evolutionary-relationship enrichment: does this cluster line up with a
+        # curated OrthoDB ortholog group and/or CATH structural fold?
+        orthodb = _ORTHODB_ENRICHMENT.get(cl, {})
+        og_desc = str(orthodb.get('Top OG Description', '') or '')[:60]
+        cath = _CATH_ENRICHMENT.get(cl, {})
+        fold_desc = (str(cath.get('FunFam', {}).get('Top Signature Description', '') or '')
+                     or str(cath.get('Gene3D', {}).get('Top Signature Description', '') or ''))[:60]
+        extras = []
+        if og_desc:
+            extras.append(f"OrthoDB ortholog: {og_desc}")
+        if fold_desc:
+            extras.append(f"CATH fold: {fold_desc}")
+        if extras:
+            line += " [" + "; ".join(extras) + "]"
+
+        lines.append(line)
 
     return "\n".join(lines)
 
@@ -748,6 +765,29 @@ def _load_annotation_enrichment():
     return df.set_index('Cluster Label').to_dict('index')
 
 _ANNOTATION_ENRICHMENT: dict = _load_annotation_enrichment()
+
+# Evolutionary-relationship enrichment: OrthoDB ortholog groups (Mammalia node) and
+# CATH structural/functional domains (Gene3D superfamily + FunFam sub-family).
+def _load_orthodb_enrichment():
+    path = BASE_DIR / 'umap_output' / 'orthodb_enrichment.csv'
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path).fillna('')
+    return df.set_index('Cluster Label').to_dict('index')
+
+def _load_cath_enrichment():
+    """Cluster Label -> {'Gene3D': {...row...}, 'FunFam': {...row...}} (one row per Analysis)."""
+    path = BASE_DIR / 'umap_output' / 'cath_enrichment.csv'
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path).fillna('')
+    out: dict = {}
+    for cl, group in df.groupby('Cluster Label'):
+        out[cl] = {row['Analysis']: row.to_dict() for _, row in group.iterrows()}
+    return out
+
+_ORTHODB_ENRICHMENT: dict = _load_orthodb_enrichment()
+_CATH_ENRICHMENT: dict    = _load_cath_enrichment()
 
 _SPECIES_TO_GROUP = {
     'Sea Lion':          'Pinniped',
@@ -3341,6 +3381,16 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
                         tip += f' (also: {", ".join(all_enriched[1:])})'
                 else:
                     tip += f'<br>Enriched: {", ".join(str(s) for s in all_enriched)}'
+            orthodb = _ORTHODB_ENRICHMENT.get(cl, {})
+            top_og_desc = str(orthodb.get('Top OG Description', '') or '')
+            if top_og_desc:
+                tip += f'<br>OrthoDB ortholog: {top_og_desc}'
+            cath = _CATH_ENRICHMENT.get(cl, {})
+            top_funfam_desc = str(cath.get('FunFam', {}).get('Top Signature Description', '') or '')
+            top_g3d_desc = str(cath.get('Gene3D', {}).get('Top Signature Description', '') or '')
+            cath_desc = top_funfam_desc or top_g3d_desc
+            if cath_desc:
+                tip += f'<br>CATH fold: {cath_desc}'
             if sil != '':
                 quality_label = 'well-separated' if well_sep else 'fuzzy'
                 tip += f'<br>Silhouette: {float(sil):.2f} ({quality_label})'
