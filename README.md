@@ -1,3 +1,13 @@
+---
+title: Proteome Visualizer RAG
+emoji: 🏃
+colorFrom: gray
+colorTo: green
+sdk: docker
+pinned: false
+short_description: This is a tool to bring proteomics closer to the public
+---
+
 # Proteome Visualizer with AI Agent
 
 Proteomics data is largely inaccessible to anyone outside a narrow research community, even though it carries rich information about species health, ecology, and evolution. We built this portal to close that gap: it visualizes the proteomes of five Southern California marine mammal species and puts an AI agent in charge of guiding users through what they are seeing.
