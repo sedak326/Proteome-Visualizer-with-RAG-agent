@@ -7,6 +7,8 @@ openai
 langchain-chroma
 langchain-openai
 flask
+scipy
+statsmodels
 
 # Only needed if regenerating animations (generate_all_animations.py)
 matplotlib
