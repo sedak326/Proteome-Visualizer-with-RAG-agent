@@ -1895,6 +1895,28 @@ app.layout = html.Div([
 
 ], style={'fontFamily': 'Arial, sans-serif'})
 
+def _get_dynamic_enrichment(active_species, loaded_data, enrichment_mode):
+    """Cached lookup of per-cluster enrichment for the given species/mode.
+
+    Shared by update_interactive_graph (hull coloring) and update_filter_count
+    (the "Showing X/Y proteins" count) so both agree on which clusters count as
+    enriched — they used to diverge, since the count display was comparing
+    against filter_tag ('unique'/'shared'), a value that's never 'enriched'.
+    """
+    key = (tuple(sorted(active_species or [])), enrichment_mode or 'species')
+    if key not in _ENRICHMENT_CACHE:
+        try:
+            _ENRICHMENT_CACHE[key] = {
+                str(k): v for k, v in _run_dynamic_enrichment(
+                    active_species, loaded_data, enrichment_mode or 'species'
+                ).items()
+            }
+        except Exception as e:
+            print(f"[enrichment] failed: {e}")
+            _ENRICHMENT_CACHE[key] = {}
+    return _ENRICHMENT_CACHE[key]
+
+
 def _compute_filter_tags(species_data_list):
     """Tag proteins as unique (unclustered, Cluster Label == -1) or shared (in a cluster).
 
@@ -3198,18 +3220,7 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
 
     # Build convex hulls for all clusters, merged into 2 traces (fill + border) using None
     # Compute dynamic enrichment once — used for hull coloring AND protein filter.
-    _enr_cache_key = (tuple(sorted(active_species or [])), enrichment_mode or 'species')
-    if _enr_cache_key not in _ENRICHMENT_CACHE:
-        try:
-            _ENRICHMENT_CACHE[_enr_cache_key] = {
-                str(k): v for k, v in _run_dynamic_enrichment(
-                    active_species, loaded_data, enrichment_mode or 'species'
-                ).items()
-            }
-        except Exception as e:
-            print(f"[enrichment] failed: {e}")
-            _ENRICHMENT_CACHE[_enr_cache_key] = {}
-    dynamic_enrichment = _ENRICHMENT_CACHE[_enr_cache_key]
+    dynamic_enrichment = _get_dynamic_enrichment(active_species, loaded_data, enrichment_mode)
     enriched_clusters = set(dynamic_enrichment.keys())  # set of str cluster labels
 
     # separators. This replaces 263 individual traces with 2, dramatically reducing browser load.
@@ -3471,9 +3482,10 @@ def update_interactive_graph(point_size, opacity, loaded_data, protein_filter, a
     Output('filter-count-display', 'children'),
     [Input('protein-filter', 'value'),
      Input('loaded-data', 'data'),
-     Input('active-species-store', 'data')]
+     Input('active-species-store', 'data'),
+     Input('enrichment-mode', 'value')]
 )
-def update_filter_count(protein_filter, loaded_data, active_species):
+def update_filter_count(protein_filter, loaded_data, active_species, enrichment_mode):
     if not loaded_data:
         return ""
     loaded_data = _get_all_species_data_cached()
@@ -3481,6 +3493,30 @@ def update_filter_count(protein_filter, loaded_data, active_species):
     active_data = [sd for sd in loaded_data if sd['name'] in active_species]
     if not active_data:
         return ""
+
+    # 'enriched' is checked against which clusters are statistically enriched
+    # (same set update_interactive_graph colors on the plot) — a separate
+    # concept from filter_tag, which only ever holds 'unique'/'shared'
+    # (used for the "unique"/"shared" chat commands). Comparing 'enriched'
+    # against filter_tag always came up empty, hence "Showing 0/N proteins"
+    # even when the plot correctly showed enriched hulls.
+    if protein_filter == 'enriched':
+        enriched_clusters = set(_get_dynamic_enrichment(active_species, loaded_data, enrichment_mode).keys())
+        total = 0
+        shown = 0
+        for species_data in active_data:
+            records = species_data['df']
+            total += len(records)
+            for r in records:
+                cl = r.get('Cluster Label')
+                try:
+                    in_enriched = cl is not None and str(int(float(cl))) in enriched_clusters
+                except (TypeError, ValueError):
+                    in_enriched = False
+                if in_enriched:
+                    shown += 1
+        return f"Showing {shown:,}/{total:,} proteins"
+
     _compute_filter_tags(active_data)
     total = 0
     shown = 0
