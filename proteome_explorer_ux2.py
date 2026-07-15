@@ -173,7 +173,27 @@ def build_cluster_summary(active_species, loaded_data):
     return "\n".join(lines)
 
 
-def build_visual_context(active_species, selected_data, loaded_data=None):
+def build_enriched_clusters_context(active_species, loaded_data, enrichment_mode):
+    """Text summary of the Enriched Clusters table — same rows the user sees when
+    they switch the table panel to that tab, so the AI can answer questions like
+    "which clusters are enriched for polar bear" grounded in the exact same data."""
+    if not loaded_data or not active_species:
+        return ""
+    rows = _build_enriched_clusters_rows(active_species, loaded_data, enrichment_mode)
+    if not rows:
+        return ""
+    lines = [f"Enriched clusters table ({len(rows)} clusters, sorted by significance):"]
+    for r in rows[:30]:  # cap at 30 to keep the prompt bounded
+        lines.append(
+            f"  Cluster {r['Cluster']} ({r['Name']}): enriched in {r['Enriched In']}, "
+            f"{r['Size']} proteins, top function: {r['Top Function']}"
+        )
+    if len(rows) > 30:
+        lines.append(f"  ... and {len(rows) - 30} more enriched clusters")
+    return "\n".join(lines)
+
+
+def build_visual_context(active_species, selected_data, loaded_data=None, enrichment_mode=None):
     """Build a text summary of what's currently on screen."""
     parts = []
     active_species = active_species or []
@@ -189,6 +209,10 @@ def build_visual_context(active_species, selected_data, loaded_data=None):
     cluster_summary = build_cluster_summary(active_species, loaded_data)
     if cluster_summary:
         parts.append(cluster_summary)
+
+    enriched_context = build_enriched_clusters_context(active_species, loaded_data, enrichment_mode)
+    if enriched_context:
+        parts.append(enriched_context)
 
     if selected_data and selected_data.get('points'):
         # Build flat entry_id -> species lookup (avoids curveNumber which is offset by hull traces)
@@ -863,11 +887,20 @@ def _run_dynamic_enrichment(active_species, loaded_data, enrichment_mode):
     result = {}
     sig_all = df_tests[df_tests['padj'] < 0.05].sort_values('padj')
     for cl, grp in sig_all.groupby('Cluster Label'):
+        # grp is already in ascending-padj order (sig_all was globally sorted before
+        # grouping, and groupby preserves row order within each group), so row 0 is
+        # this cluster's most significant enrichment.
         dominant = grp.iloc[0]['label']
         all_enriched = grp['label'].tolist()
         color = _GROUP_COLORS.get(dominant, '#666677') if enrichment_mode == 'group' \
                 else SPECIES_DATA.get(dominant, {}).get('color', '#666677')
-        result[cl] = {'dominant': dominant, 'color': color, 'all_enriched': all_enriched}
+        result[cl] = {
+            'dominant': dominant,
+            'color': color,
+            'all_enriched': all_enriched,
+            'padj': float(grp.iloc[0]['padj']),
+            'size': int(grp.iloc[0]['M']),
+        }
     return result
 
 # Full-resolution search index: species_name -> list of {Entry, Protein names, Cluster Label}
@@ -1775,6 +1808,24 @@ app.layout = html.Div([
                                'fontFamily': '"JetBrains Mono", monospace',
                                'letterSpacing': '0.5px'}),
             ], style={'marginBottom': 14}),
+
+            # Tab switcher — same panel area shows either the selected-proteins
+            # table or the enriched-clusters table, picked here.
+            dcc.RadioItems(
+                id='table-view-mode',
+                options=[
+                    {'label': 'SELECTED PROTEINS', 'value': 'proteins'},
+                    {'label': 'ENRICHED CLUSTERS', 'value': 'enriched'},
+                ],
+                value='proteins',
+                style={'fontFamily': '"JetBrains Mono", monospace', 'fontSize': 11,
+                       'letterSpacing': '0.5px', 'display': 'flex', 'gap': '4px',
+                       'marginBottom': 14},
+                labelStyle={'display': 'inline-flex', 'alignItems': 'center',
+                            'color': '#a8dadc', 'cursor': 'pointer',
+                            'marginRight': 16, 'whiteSpace': 'nowrap'},
+                inputStyle={'marginRight': 6}
+            ),
 
             # Search bar — now lives here, clearly associated with the table
             html.Div([
@@ -3089,6 +3140,26 @@ def table_row_click(active_cell, table_data, loaded_data, active_species, last_c
         return {'row': row_idx, 'entry': entry_id}, dash.no_update
 
 
+# Clicking a row in the Enriched Clusters table highlights that cluster on the plot.
+@app.callback(
+    Output('highlight-store', 'data', allow_duplicate=True),
+    Input('enriched-clusters-datatable', 'active_cell'),
+    [State('enriched-clusters-datatable', 'data'),
+     State('loaded-data', 'data'),
+     State('active-species-store', 'data')],
+    prevent_initial_call=True,
+)
+def enriched_cluster_row_click(active_cell, table_data, loaded_data, active_species):
+    if not active_cell or not table_data:
+        raise dash.exceptions.PreventUpdate
+    loaded_data = _get_all_species_data_cached() if loaded_data else None
+    row = table_data[active_cell['row']]
+    cluster_id = row.get('Cluster')
+    if cluster_id is None:
+        raise dash.exceptions.PreventUpdate
+    return _resolve_highlight_query(str(cluster_id), loaded_data, active_species)
+
+
 # --- Toggle species in active-species-store ---
 @app.callback(
     Output('active-species-store', 'data', allow_duplicate=True),
@@ -3601,6 +3672,82 @@ def _render_table(rows, header_text, header_color='#64ffda'):
     ])
 
 
+def _build_enriched_clusters_rows(active_species, loaded_data, enrichment_mode):
+    """Build row dicts for the Enriched Clusters table — same underlying data as
+    the hull coloring on the plot (_get_dynamic_enrichment), so the table and the
+    visualization can never disagree on which clusters count as enriched."""
+    dynamic_enrichment = _get_dynamic_enrichment(active_species, loaded_data, enrichment_mode)
+    rows = []
+    for cl_str, info in dynamic_enrichment.items():
+        cl = int(cl_str)
+        cluster_name = _CLUSTER_QUALITY.get(cl, {}).get('Cluster Name') or f'Cluster {cl}'
+        top_term = str(_ANNOTATION_ENRICHMENT.get(cl, {}).get('Top Term', '') or '') or '—'
+        all_enriched = info.get('all_enriched') or [info.get('dominant', '')]
+        rows.append({
+            'Cluster': cl,
+            'Name': cluster_name,
+            'Enriched In': ', '.join(str(s) for s in all_enriched),
+            'Size': info.get('size', ''),
+            'Top Function': top_term,
+            '_padj': info.get('padj', 1.0),
+        })
+    rows.sort(key=lambda r: r['_padj'])
+    for r in rows:
+        del r['_padj']
+    return rows
+
+
+def _render_enriched_clusters_table(rows):
+    """Render the Enriched Clusters DataTable — clicking a row highlights that
+    cluster on the plot (see enriched_cluster_row_click)."""
+    header_text = f"{len(rows)} enriched cluster{'s' if len(rows) != 1 else ''}"
+    return html.Div([
+        html.Div(header_text,
+                style={'fontSize': 13, 'fontWeight': '600', 'marginBottom': 15,
+                      'color': '#64ffda', 'fontFamily': '"JetBrains Mono", monospace',
+                      'letterSpacing': '1px'}),
+        dash_table.DataTable(
+            id='enriched-clusters-datatable',
+            data=rows,
+            columns=[
+                {'name': 'Cluster', 'id': 'Cluster'},
+                {'name': 'Name', 'id': 'Name'},
+                {'name': 'Enriched In', 'id': 'Enriched In'},
+                {'name': 'Size', 'id': 'Size'},
+                {'name': 'Top Function', 'id': 'Top Function'},
+            ],
+            style_table={'overflowX': 'auto', 'borderRadius': '8px'},
+            style_cell={
+                'textAlign': 'left', 'padding': '12px 10px',
+                'fontFamily': '"JetBrains Mono", monospace', 'fontSize': 11,
+                'overflow': 'hidden', 'textOverflow': 'ellipsis',
+                'maxWidth': '220px', 'backgroundColor': 'transparent', 'border': 'none'
+            },
+            style_header={
+                'backgroundColor': 'rgba(100, 255, 218, 0.1)', 'fontWeight': '600',
+                'color': '#64ffda', 'borderBottom': '1px solid rgba(100, 255, 218, 0.2)',
+                'fontSize': 10, 'textTransform': 'uppercase', 'letterSpacing': '1px'
+            },
+            style_data={
+                'backgroundColor': 'rgba(10, 25, 47, 0.4)', 'color': '#f1faee',
+                'borderBottom': '1px solid rgba(100, 255, 218, 0.1)', 'cursor': 'pointer'
+            },
+            css=[
+                {'selector': 'td.dash-cell', 'rule': 'color: #f1faee !important;'},
+                {'selector': 'td.dash-cell.focused', 'rule': 'background-color: rgba(100, 255, 218, 0.15) !important; color: #f1faee !important; outline: none !important;'},
+                {'selector': 'tr:hover td', 'rule': 'color: #f1faee !important;'},
+            ],
+            style_data_conditional=[
+                {'if': {'row_index': 'odd'}, 'backgroundColor': 'rgba(10, 25, 47, 0.6)'},
+                {'if': {'state': 'active'}, 'backgroundColor': 'rgba(100, 255, 218, 0.15)',
+                 'color': '#f1faee', 'border': '1px solid rgba(100, 255, 218, 0.3)'}
+            ],
+            editable=False, page_size=10, page_action='native',
+            sort_action='native', sort_by=[{'column_id': 'Size', 'direction': 'desc'}]
+        )
+    ])
+
+
 def _build_protein_rows(entry_ids, loaded_data, active_species):
     """Build table row dicts from a list of (species_name, entry_id) tuples."""
     active_species = active_species or []
@@ -3642,14 +3789,20 @@ def _build_protein_rows(entry_ids, loaded_data, active_species):
 @app.callback(
     Output('selection-table-container', 'children'),
     [Input('interactive-graph', 'selectedData'),
-     Input('highlight-store', 'data')],
-    [State('loaded-data', 'data'),
-     State('active-species-store', 'data')]
+     Input('highlight-store', 'data'),
+     Input('table-view-mode', 'value'),
+     Input('active-species-store', 'data'),
+     Input('enrichment-mode', 'value')],
+    [State('loaded-data', 'data')]
 )
-def show_selected_proteins(selectedData, highlight_data, loaded_data, active_species):
+def show_selected_proteins(selectedData, highlight_data, table_view_mode, active_species, enrichment_mode, loaded_data):
     if not loaded_data:
         return "No proteins selected. Click or drag to select."
     loaded_data = _get_all_species_data_cached()
+
+    if table_view_mode == 'enriched':
+        rows = _build_enriched_clusters_rows(active_species, loaded_data, enrichment_mode)
+        return _render_enriched_clusters_table(rows)
 
     # Highlight search takes precedence when nothing is lassoed
     if (not selectedData or not selectedData.get('points')) and highlight_data and highlight_data.get('entry_ids'):
@@ -3975,16 +4128,17 @@ app.clientside_callback(
      State('point-size', 'value'),
      State('opacity', 'value'),
      State('selected-cluster-store', 'data'),
-     State('protein-filter', 'value')],
+     State('protein-filter', 'value'),
+     State('enrichment-mode', 'value')],
     prevent_initial_call=True,
 )
-def process_chat_query(pending_query, chat_history, active_species, selected_data, loaded_data, highlight_store, current_size, current_opacity, selected_cluster, protein_filter):
+def process_chat_query(pending_query, chat_history, active_species, selected_data, loaded_data, highlight_store, current_size, current_opacity, selected_cluster, protein_filter, enrichment_mode):
     if not pending_query:
         raise dash.exceptions.PreventUpdate
 
     loaded_data = _get_all_species_data_cached() if loaded_data else None
     chat_history = chat_history or []
-    visual_context = build_visual_context(active_species, selected_data, loaded_data)
+    visual_context = build_visual_context(active_species, selected_data, loaded_data, enrichment_mode)
 
     # Inject active filter context
     if protein_filter and protein_filter != 'all':
